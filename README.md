@@ -21,4 +21,4 @@ The local server provides automatic SPY and USD / ILS quotes. Quotes require an 
 3. The workflow in `.github/workflows/deploy.yml` deploys the site after pushes to `main`. You can also start it from the repository's **Actions** tab.
 4. Once the workflow completes, open the Pages URL shown in **Settings → Pages**.
 
-GitHub Pages hosts the tracker as a static site; it cannot run the Python quote server. The USD / ILS reference rate is fetched online from ExchangeRate-API when the page loads; rates are updated daily, and the refresh button fetches the latest available rate. Enter the SPY price manually. Buys and entered values remain in that browser's local storage.
+GitHub Pages hosts the tracker as a static site; it cannot run the Python quote server. The deployment workflow fetches the SPY quote and republishes it about every 15 minutes. The page also refreshes the quote while open and when you use the refresh button. USD / ILS is fetched online from ExchangeRate-API when the page loads; rates are updated daily. Buys and entered values remain in that browser's local storage.

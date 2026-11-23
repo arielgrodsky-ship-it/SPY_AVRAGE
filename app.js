@@ -81,7 +81,10 @@ async function refreshQuote() {
       if (!response.ok) throw new Error('SPY quote request failed');
       return response.json();
     })
-    : null;
+    : fetch(`./spy-price.json?${Date.now()}`, { cache: 'no-store' }).then(async (response) => {
+      if (!response.ok) throw new Error('SPY quote request failed');
+      return response.json();
+    });
   const fxQuoteRequest = hasLocalQuoteApi
     ? fetch('/api/usd-ils', { cache: 'no-store' }).then(async (response) => {
       if (!response.ok) throw new Error('USD / ILS quote request failed');
@@ -96,13 +99,9 @@ async function refreshQuote() {
         timestamp: quote.time_last_update_unix,
       };
     });
-  const requests = await Promise.allSettled([
-    ...(spyQuoteRequest ? [spyQuoteRequest] : []),
-    fxQuoteRequest,
-  ]);
+  const requests = await Promise.allSettled([spyQuoteRequest, fxQuoteRequest]);
 
-  const spyResult = hasLocalQuoteApi ? requests[0] : null;
-  const fxResult = requests[hasLocalQuoteApi ? 1 : 0];
+  const [spyResult, fxResult] = requests;
   if (spyResult?.status === 'fulfilled' && spyResult.value.currency === 'USD' && Number.isFinite(spyResult.value.price) && spyResult.value.price > 0 && Number.isFinite(spyResult.value.timestamp)) {
     elements.currentPrice.value = spyResult.value.price.toFixed(2);
     state.currentPrice = elements.currentPrice.value;
@@ -241,9 +240,9 @@ elements.exchangeRate.value = state.exchangeRate;
 if (state.quoteUpdatedAt) showQuoteStatus(elements.spyQuoteStatus, `Saved SPY · ${quoteTime(state.quoteUpdatedAt)}`);
 if (state.exchangeRateUpdatedAt) showQuoteStatus(elements.fxQuoteStatus, `Saved USD / ILS · ${fxQuoteTime(state.exchangeRateUpdatedAt)}`);
 if (!hasLocalQuoteApi) {
-  showQuoteStatus(elements.spyQuoteStatus, 'Enter SPY price manually');
+  showQuoteStatus(elements.spyQuoteStatus, 'Fetching SPY quote…');
   showQuoteStatus(elements.fxQuoteStatus, 'Fetching USD / ILS rate…');
 }
 render();
 refreshQuote();
-if (hasLocalQuoteApi) window.setInterval(refreshQuote, 5 * 60 * 1000);
+window.setInterval(refreshQuote, hasLocalQuoteApi ? 5 * 60 * 1000 : 15 * 60 * 1000);
