@@ -87,13 +87,13 @@ async function refreshQuote() {
       if (!response.ok) throw new Error('USD / ILS quote request failed');
       return response.json();
     })
-    : fetch('https://api.frankfurter.app/latest?from=USD&to=ILS', { cache: 'no-store' }).then(async (response) => {
+    : fetch('https://open.er-api.com/v6/latest/USD', { cache: 'no-store' }).then(async (response) => {
       if (!response.ok) throw new Error('USD / ILS quote request failed');
       const quote = await response.json();
       return {
         price: quote.rates?.ILS,
-        currency: quote.base === 'USD' ? 'ILS' : '',
-        timestamp: Date.parse(`${quote.date}T00:00:00Z`) / 1000,
+        currency: quote.result === 'success' && quote.base_code === 'USD' ? 'ILS' : '',
+        timestamp: quote.time_last_update_unix,
       };
     });
   const requests = await Promise.allSettled([
