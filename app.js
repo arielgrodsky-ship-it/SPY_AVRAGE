@@ -1,6 +1,7 @@
 const STORAGE_KEY = 'fieldnotes.spy-tracker.v1';
 const DIVIDEND_STORAGE_KEY = 'fieldnotes.spy-tracker.dividends.v1';
 const SYNC_OWNER_STORAGE_KEY = 'fieldnotes.spy-tracker.sync-owner.v1';
+const FIRESTORE_TIMEOUT_MS = 10000;
 const hasLocalQuoteApi = ['localhost', '127.0.0.1'].includes(window.location.hostname);
 let stateWritable = true;
 let dividendsWritable = true;
@@ -51,6 +52,7 @@ let cloudSyncInProgress = false;
 let cloudWriteQueued = false;
 let cloudWriteFingerprint = null;
 let lastSyncedCloudFingerprint = null;
+let cloudInitialReadTimer = null;
 let cloudListenerGeneration = 0;
 let pendingCloudSnapshot = null;
 let accountSwitchApproved = false;
@@ -59,6 +61,38 @@ function setSyncStatus(message, stateName = 'idle', title = '') {
   elements.syncStatus.textContent = message;
   elements.syncStatus.dataset.state = stateName;
   elements.syncStatus.title = title;
+}
+
+function reportSyncError(context, error, fallbackCode = 'firestore/unknown') {
+  const code = error?.code || fallbackCode;
+  const message = error?.message || String(error);
+  console.error(`[Fieldnotes sync] ${context}`, { code, message });
+  setSyncStatus('Sync error', 'error', `${code}: ${message}`);
+}
+
+function firebaseConfigError() {
+  const config = window.FIELDNOTES_FIREBASE_CONFIG;
+  const requiredKeys = ['apiKey', 'authDomain', 'projectId', 'appId'];
+  const missingKeys = requiredKeys.filter((key) => (
+    typeof config?.[key] !== 'string'
+    || !config[key].trim()
+    || config[key].startsWith('PASTE_')
+  ));
+  const error = new Error(`Missing or placeholder Firebase config value(s): ${missingKeys.join(', ')}`);
+  error.code = 'firebase/config-missing';
+  return error;
+}
+
+function withTimeout(promise, timeoutMs, code, message) {
+  let timeoutId;
+  const timeout = new Promise((_, reject) => {
+    timeoutId = window.setTimeout(() => {
+      const error = new Error(message);
+      error.code = code;
+      reject(error);
+    }, timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => window.clearTimeout(timeoutId));
 }
 
 function firebaseConfigIsReady() {
@@ -410,20 +444,24 @@ async function writeCloudData(data) {
   cloudWriteQueued = false;
   setSyncStatus('Syncing…', 'syncing');
   try {
-    await targetDocument.set({
-      ...data,
-      clientUpdatedAt: data.updatedAt,
-      updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
-    });
+    await withTimeout(
+      targetDocument.set({
+        ...data,
+        clientUpdatedAt: data.updatedAt,
+        updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+      }),
+      FIRESTORE_TIMEOUT_MS,
+      'firestore/write-timeout',
+      `The Firestore write did not finish within ${FIRESTORE_TIMEOUT_MS / 1000} seconds.`,
+    );
     if (generation === cloudListenerGeneration) {
       lastSyncedCloudFingerprint = fingerprint;
       if (rememberSyncOwner(currentUser.uid)) setSyncStatus('Synced ✓', 'synced');
     }
     return true;
   } catch (error) {
-    if (generation === cloudListenerGeneration) {
-      setSyncStatus(navigator.onLine ? `Sync error: ${error.message}` : 'Offline', navigator.onLine ? 'error' : 'offline', error.message);
-    }
+    cloudWriteQueued = false;
+    if (generation === cloudListenerGeneration) reportSyncError('Firestore write', error, 'firestore/write-failed');
     return false;
   } finally {
     if (generation === cloudListenerGeneration) {
@@ -437,6 +475,7 @@ async function writeCloudData(data) {
 function requestSyncChoice() {
   return new Promise((resolve) => {
     const dialog = elements.syncConflictDialog;
+    setSyncStatus('Choose sync option', 'idle', 'Choose which tracker data to use for the first sync.');
     const handleClose = () => resolve(dialog.returnValue || 'cancel');
     dialog.addEventListener('close', handleClose, { once: true });
     dialog.showModal();
@@ -527,13 +566,15 @@ function handleCloudSnapshot(snapshot, generation = cloudListenerGeneration) {
       setSyncStatus(navigator.onLine ? 'Syncing…' : 'Offline', navigator.onLine ? 'syncing' : 'offline');
       return;
     }
+    if (cloudInitialReadTimer !== null) window.clearTimeout(cloudInitialReadTimer);
+    cloudInitialReadTimer = null;
     if (cloudInitialResolution) {
       pendingCloudSnapshot = snapshot;
       return;
     }
     cloudInitialResolution = resolveInitialCloudData(snapshot, generation)
       .catch((error) => {
-        if (generation === cloudListenerGeneration) setSyncStatus(`Sync error: ${error.message}`, 'error', error.message);
+        if (generation === cloudListenerGeneration) reportSyncError('Initial Firestore read', error, 'firestore/initial-read-failed');
       })
       .finally(() => {
         if (generation !== cloudListenerGeneration) return;
@@ -565,27 +606,45 @@ function handleCloudSnapshot(snapshot, generation = cloudListenerGeneration) {
       setSyncStatus('Synced ✓', 'synced');
     }
   } catch (error) {
-    setSyncStatus(`Sync error: ${error.message}`, 'error', error.message);
+    reportSyncError('Firestore snapshot', error, 'firestore/snapshot-invalid');
   }
 }
 
 function connectCloudListener() {
   if (!currentUser || !firestore || userDocument) return;
   const generation = cloudListenerGeneration;
-  userDocument = firestore.doc(`users/${currentUser.uid}/tracker/data`);
-  unsubscribeCloud = userDocument.onSnapshot(
-    (snapshot) => handleCloudSnapshot(snapshot, generation),
-    (error) => {
-      if (generation === cloudListenerGeneration) setSyncStatus(`Sync error: ${error.message}`, 'error', error.message);
-    },
-  );
+  try {
+    userDocument = firestore.doc(`users/${currentUser.uid}/tracker/data`);
+    cloudInitialReadTimer = window.setTimeout(() => {
+      cloudInitialReadTimer = null;
+      if (generation !== cloudListenerGeneration || cloudInitialResolved) return;
+      const error = new Error(`The first Firestore snapshot did not arrive within ${FIRESTORE_TIMEOUT_MS / 1000} seconds.`);
+      error.code = 'firestore/initial-read-timeout';
+      reportSyncError('Initial Firestore read', error);
+    }, FIRESTORE_TIMEOUT_MS);
+    unsubscribeCloud = userDocument.onSnapshot(
+      (snapshot) => handleCloudSnapshot(snapshot, generation),
+      (error) => {
+        if (generation !== cloudListenerGeneration) return;
+        if (cloudInitialReadTimer !== null) window.clearTimeout(cloudInitialReadTimer);
+        cloudInitialReadTimer = null;
+        reportSyncError('Firestore read', error, 'firestore/read-failed');
+      },
+    );
+  } catch (error) {
+    if (cloudInitialReadTimer !== null) window.clearTimeout(cloudInitialReadTimer);
+    cloudInitialReadTimer = null;
+    reportSyncError('Firestore setup', error, 'firestore/setup-failed');
+  }
 }
 
 function handleAuthStateChange(user) {
   cloudListenerGeneration += 1;
   if (unsubscribeCloud) unsubscribeCloud();
   if (cloudSyncTimer !== null) window.clearTimeout(cloudSyncTimer);
+  if (cloudInitialReadTimer !== null) window.clearTimeout(cloudInitialReadTimer);
   cloudSyncTimer = null;
+  cloudInitialReadTimer = null;
   currentUser = user;
   userDocument = null;
   cloudInitialResolved = false;
@@ -617,7 +676,7 @@ function handleAuthStateChange(user) {
     }
   } catch (error) {
     syncPausedForConflict = true;
-    setSyncStatus(`Sync error: ${error.message}`, 'error', error.message);
+    reportSyncError('Local sync account check', error, 'sync/account-check-failed');
     return;
   }
   if (!navigator.onLine) {
@@ -630,11 +689,13 @@ function handleAuthStateChange(user) {
 
 function initializeCloudSync() {
   if (!firebaseConfigIsReady()) {
-    setSyncStatus('Sync setup needed', 'idle', 'Paste the Firebase web config into firebase-config.js.');
+    reportSyncError('Firebase setup', firebaseConfigError());
     return;
   }
   if (typeof firebase === 'undefined') {
-    setSyncStatus('Sync SDK unavailable', 'error', 'The Firebase SDK could not be loaded from the official CDN.');
+    const error = new Error('The Firebase SDK could not be loaded from the official CDN.');
+    error.code = 'firebase/sdk-unavailable';
+    reportSyncError('Firebase setup', error);
     return;
   }
   try {
@@ -642,23 +703,26 @@ function initializeCloudSync() {
     firebaseAuth = app.auth();
     firestore = app.firestore();
     firebaseAuth.onAuthStateChanged(handleAuthStateChange, (error) => {
-      setSyncStatus(`Sync error: ${error.message}`, 'error', error.message);
+      reportSyncError('Firebase authentication setup', error, 'firebase/auth-state-failed');
     });
     firebaseAuth.getRedirectResult().catch((error) => {
-      setSyncStatus(`Sign-in error: ${error.message}`, 'error', error.message);
+      reportSyncError('Google sign-in redirect', error, 'firebase/redirect-result-failed');
     });
   } catch (error) {
-    setSyncStatus(`Sync error: ${error.message}`, 'error', error.message);
+    reportSyncError('Firebase setup', error, 'firebase/initialization-failed');
   }
 }
 
 async function toggleGoogleSignIn() {
   if (!firebaseConfigIsReady()) {
-    setSyncStatus('Sync setup needed', 'idle', 'Paste the Firebase web config into firebase-config.js.');
+    reportSyncError('Firebase setup', firebaseConfigError());
     window.alert('Add your Firebase web app config to firebase-config.js before signing in.');
     return;
   }
   if (!firebaseAuth) {
+    const error = new Error('Firebase could not initialize. Check your Firebase config and network connection.');
+    error.code = 'firebase/not-initialized';
+    reportSyncError('Firebase setup', error);
     window.alert('Firebase could not initialize. Check your Firebase config and network connection.');
     return;
   }
@@ -675,7 +739,7 @@ async function toggleGoogleSignIn() {
       }
     }
   } catch (error) {
-    setSyncStatus(`Sign-in error: ${error.message}`, 'error', error.message);
+    reportSyncError('Google sign-in', error, 'firebase/sign-in-failed');
   } finally {
     elements.signInButton.disabled = false;
   }
