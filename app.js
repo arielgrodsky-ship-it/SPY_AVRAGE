@@ -306,6 +306,7 @@ function persistLocalTrackerData(data, options = {}) {
     setSyncStatus('Sync blocked by local storage error', 'error');
     return false;
   }
+  const shouldRender = stableTrackerData(data) !== stableTrackerData(currentTrackerData());
   let previousState;
   let previousDividends;
   try {
@@ -350,7 +351,12 @@ function persistLocalTrackerData(data, options = {}) {
   elements.currentPrice.value = state.currentPrice;
   elements.exchangeRate.value = state.exchangeRate;
   updateSaveStatus();
-  render();
+  if (shouldRender) {
+    const scrollLeft = window.scrollX;
+    const scrollTop = window.scrollY;
+    render();
+    window.scrollTo(scrollLeft, scrollTop);
+  }
   if (options.sync !== false) scheduleCloudWrite();
   return true;
 }
