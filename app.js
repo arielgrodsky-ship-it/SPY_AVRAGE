@@ -1,5 +1,6 @@
 const STORAGE_KEY = 'fieldnotes.spy-tracker.v1';
 const DIVIDEND_STORAGE_KEY = 'fieldnotes.spy-tracker.dividends.v1';
+const SYNC_OWNER_STORAGE_KEY = 'fieldnotes.spy-tracker.sync-owner.v1';
 const hasLocalQuoteApi = ['localhost', '127.0.0.1'].includes(window.location.hostname);
 let stateWritable = true;
 let dividendsWritable = true;
@@ -32,7 +33,48 @@ const elements = {
   chartTooltip: document.querySelector('#chart-tooltip'),
   returnDirection: document.querySelector('#return-direction'),
   toastRegion: document.querySelector('#toast-region'),
+  signInButton: document.querySelector('#sign-in-button'),
+  syncStatus: document.querySelector('#sync-status'),
+  syncConflictDialog: document.querySelector('#sync-conflict-dialog'),
 };
+
+let firebaseAuth = null;
+let firestore = null;
+let currentUser = null;
+let userDocument = null;
+let unsubscribeCloud = null;
+let cloudInitialResolved = false;
+let cloudInitialResolution = null;
+let cloudSyncTimer = null;
+let syncPausedForConflict = false;
+let cloudSyncInProgress = false;
+let cloudWriteQueued = false;
+let cloudListenerGeneration = 0;
+let pendingCloudSnapshot = null;
+let accountSwitchApproved = false;
+
+function setSyncStatus(message, stateName = 'idle', title = '') {
+  elements.syncStatus.textContent = message;
+  elements.syncStatus.dataset.state = stateName;
+  elements.syncStatus.title = title;
+}
+
+function firebaseConfigIsReady() {
+  const config = window.FIELDNOTES_FIREBASE_CONFIG;
+  return Boolean(config && ['apiKey', 'authDomain', 'projectId', 'appId'].every((key) => (
+    typeof config[key] === 'string' && config[key].trim() && !config[key].startsWith('PASTE_')
+  )));
+}
+
+function rememberSyncOwner(uid) {
+  try {
+    localStorage.setItem(SYNC_OWNER_STORAGE_KEY, uid);
+    return true;
+  } catch (error) {
+    setSyncStatus('Sync warning: account could not be remembered', 'error', error.message);
+    return false;
+  }
+}
 
 function loadState() {
   try {
@@ -49,6 +91,7 @@ function loadState() {
       exchangeRate: saved?.exchangeRate ?? '',
       quoteUpdatedAt: Number.isFinite(saved?.quoteUpdatedAt) ? saved.quoteUpdatedAt : null,
       exchangeRateUpdatedAt: Number.isFinite(saved?.exchangeRateUpdatedAt) ? saved.exchangeRateUpdatedAt : null,
+      updatedAt: Number.isFinite(saved?.updatedAt) ? saved.updatedAt : 0,
     };
   } catch {
     stateWritable = false;
@@ -77,7 +120,9 @@ let showAllBuys = false;
 function saveState() {
   if (!stateWritable) return false;
   try {
+    state.updatedAt = nextUpdatedAt(state.updatedAt);
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    scheduleCloudWrite();
     return true;
   } catch {
     stateWritable = false;
@@ -88,14 +133,8 @@ function saveState() {
 
 function saveDividends() {
   if (!dividendsWritable) return false;
-  try {
-    localStorage.setItem(DIVIDEND_STORAGE_KEY, JSON.stringify(dividends));
-    return true;
-  } catch {
-    dividendsWritable = false;
-    updateSaveStatus();
-    return false;
-  }
+  state.updatedAt = nextUpdatedAt(state.updatedAt);
+  return persistLocalTrackerData(currentTrackerData(), { sync: true });
 }
 
 function updateSaveStatus() {
@@ -112,6 +151,508 @@ function updateSaveStatus() {
   for (const input of [elements.currentPrice, elements.exchangeRate]) input.disabled = !stateWritable;
   elements.clearAll.disabled = !stateWritable;
 }
+
+function timestampValue(value) {
+  if (Number.isFinite(value)) return value;
+  if (value && typeof value.toMillis === 'function') return value.toMillis();
+  return 0;
+}
+
+function nextUpdatedAt(previous = 0) {
+  return Math.max(Date.now(), (Number.isFinite(previous) ? previous : 0) + 1);
+}
+
+function currentTrackerData() {
+  const recordUpdatedAt = Number.isFinite(state.updatedAt) && state.updatedAt > 0 ? state.updatedAt : 1;
+  return {
+    buys: state.buys.map((buy) => Number.isFinite(buy.updatedAt) ? buy : { ...buy, updatedAt: recordUpdatedAt }),
+    dividends: dividends.map((dividend) => Number.isFinite(dividend.updatedAt) ? dividend : { ...dividend, updatedAt: recordUpdatedAt }),
+    currentPrice: state.currentPrice,
+    exchangeRate: state.exchangeRate,
+    quoteUpdatedAt: state.quoteUpdatedAt,
+    exchangeRateUpdatedAt: state.exchangeRateUpdatedAt,
+    updatedAt: Number.isFinite(state.updatedAt) ? state.updatedAt : 0,
+  };
+}
+
+function normalizeCloudData(data) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('The cloud tracker document is not a valid object.');
+  const rawBuys = data.buys === undefined ? [] : data.buys;
+  const rawDividends = data.dividends === undefined ? [] : data.dividends;
+  if (!Array.isArray(rawBuys) || !rawBuys.every(isValidBuy)) throw new Error('The cloud tracker contains invalid buy lots.');
+  if (!Array.isArray(rawDividends) || !rawDividends.every(isValidDividend)) throw new Error('The cloud tracker contains invalid dividends.');
+  if (!isValidQuote(data.currentPrice) || !isValidQuote(data.exchangeRate)) throw new Error('The cloud tracker contains invalid market settings.');
+  const updatedAt = timestampValue(data.updatedAt) || timestampValue(data.clientUpdatedAt);
+  const recordUpdatedAt = updatedAt || 1;
+  return {
+    buys: rawBuys.map((buy) => Number.isFinite(buy.updatedAt) ? buy : { ...buy, updatedAt: recordUpdatedAt }),
+    dividends: rawDividends.map((dividend) => Number.isFinite(dividend.updatedAt) ? dividend : { ...dividend, updatedAt: recordUpdatedAt }),
+    currentPrice: data.currentPrice ?? '',
+    exchangeRate: data.exchangeRate ?? '',
+    quoteUpdatedAt: Number.isFinite(data.quoteUpdatedAt) ? data.quoteUpdatedAt : null,
+    exchangeRateUpdatedAt: Number.isFinite(data.exchangeRateUpdatedAt) ? data.exchangeRateUpdatedAt : null,
+    updatedAt,
+  };
+}
+
+function trackerDataHasRecords(data) {
+  return data.buys.length > 0 || data.dividends.length > 0;
+}
+
+function trackerDataHasContent(data) {
+  return trackerDataHasRecords(data) || Boolean(data.currentPrice || data.exchangeRate);
+}
+
+function localNeedsRecordMetadata() {
+  return state.buys.some((buy) => !Number.isFinite(buy.updatedAt))
+    || dividends.some((dividend) => !Number.isFinite(dividend.updatedAt));
+}
+
+function buySignature(buy) {
+  return `${buy.date}|${Number(buy.shares)}|${Number(buy.price)}`;
+}
+
+function mergeRecordLists(first, second, kind) {
+  const records = new Map();
+  for (const item of [...first, ...second]) {
+    const previous = records.get(item.id);
+    const itemTime = Number.isFinite(item.updatedAt) ? item.updatedAt : 0;
+    const previousTime = Number.isFinite(previous?.updatedAt) ? previous.updatedAt : 0;
+    if (!previous || itemTime > previousTime || (itemTime === previousTime && item.deleted && !previous.deleted)) {
+      records.set(item.id, item);
+    }
+  }
+
+  if (kind === 'buy') {
+    const activeBySignature = new Map();
+    for (const item of records.values()) {
+      if (item.deleted) continue;
+      const signature = buySignature(item);
+      const previous = activeBySignature.get(signature);
+      const itemTime = Number.isFinite(item.updatedAt) ? item.updatedAt : 0;
+      const previousTime = Number.isFinite(previous?.updatedAt) ? previous.updatedAt : 0;
+      if (!previous || itemTime > previousTime || (itemTime === previousTime && item.id.localeCompare(previous.id) < 0)) {
+        activeBySignature.set(signature, item);
+      }
+    }
+    for (const item of records.values()) {
+      if (item.deleted || activeBySignature.get(buySignature(item)) === item) continue;
+      records.set(item.id, { ...item, deleted: true, updatedAt: nextUpdatedAt(item.updatedAt) });
+    }
+  }
+  return [...records.values()];
+}
+
+function chooseRecords(preferred, other, kind) {
+  const records = new Map(preferred.map((item) => [item.id, item]));
+  for (const item of other) {
+    if (!item.deleted) continue;
+    const previous = records.get(item.id);
+    const itemTime = Number.isFinite(item.updatedAt) ? item.updatedAt : 0;
+    const previousTime = Number.isFinite(previous?.updatedAt) ? previous.updatedAt : 0;
+    if (!previous || itemTime >= previousTime) records.set(item.id, item);
+  }
+  return kind === 'buy' ? mergeRecordLists([...records.values()], [], kind) : [...records.values()];
+}
+
+function mergeTrackerData(local, remote, preference = 'newest') {
+  const settings = preference === 'cloud'
+    ? remote
+    : preference === 'device'
+      ? local
+      : (local.updatedAt >= remote.updatedAt ? local : remote);
+  let buys;
+  let mergedDividends;
+  if (preference === 'cloud') {
+    buys = chooseRecords(remote.buys, local.buys, 'buy');
+    mergedDividends = chooseRecords(remote.dividends, local.dividends, 'dividend');
+  } else if (preference === 'device') {
+    buys = chooseRecords(local.buys, remote.buys, 'buy');
+    mergedDividends = chooseRecords(local.dividends, remote.dividends, 'dividend');
+  } else {
+    buys = mergeRecordLists(local.buys, remote.buys, 'buy');
+    mergedDividends = mergeRecordLists(local.dividends, remote.dividends, 'dividend');
+  }
+  return {
+    ...settings,
+    buys,
+    dividends: mergedDividends,
+    updatedAt: Math.max(local.updatedAt || 0, remote.updatedAt || 0),
+  };
+}
+
+function stableTrackerData(data) {
+  return JSON.stringify({
+    currentPrice: data.currentPrice,
+    exchangeRate: data.exchangeRate,
+    quoteUpdatedAt: data.quoteUpdatedAt,
+    exchangeRateUpdatedAt: data.exchangeRateUpdatedAt,
+    buys: [...data.buys].sort((first, second) => first.id.localeCompare(second.id)),
+    dividends: [...data.dividends].sort((first, second) => first.id.localeCompare(second.id)),
+  });
+}
+
+function persistLocalTrackerData(data, options = {}) {
+  if (!stateWritable || !dividendsWritable) {
+    setSyncStatus('Sync blocked by local storage error', 'error');
+    return false;
+  }
+  let previousState;
+  let previousDividends;
+  try {
+    previousState = localStorage.getItem(STORAGE_KEY);
+    previousDividends = localStorage.getItem(DIVIDEND_STORAGE_KEY);
+    const nextState = {
+      buys: data.buys,
+      currentPrice: data.currentPrice,
+      exchangeRate: data.exchangeRate,
+      quoteUpdatedAt: data.quoteUpdatedAt,
+      exchangeRateUpdatedAt: data.exchangeRateUpdatedAt,
+      updatedAt: data.updatedAt,
+    };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(nextState));
+    localStorage.setItem(DIVIDEND_STORAGE_KEY, JSON.stringify(data.dividends));
+  } catch (error) {
+    try {
+      if (previousState === null) localStorage.removeItem(STORAGE_KEY);
+      else if (previousState !== undefined) localStorage.setItem(STORAGE_KEY, previousState);
+      if (previousDividends === null) localStorage.removeItem(DIVIDEND_STORAGE_KEY);
+      else if (previousDividends !== undefined) localStorage.setItem(DIVIDEND_STORAGE_KEY, previousDividends);
+    } catch {
+      stateWritable = false;
+      dividendsWritable = false;
+    }
+    stateWritable = false;
+    dividendsWritable = false;
+    updateSaveStatus();
+    if (options.sync === false) setSyncStatus(`Sync blocked: ${error.message}`, 'error');
+    return false;
+  }
+
+  state = {
+    buys: data.buys,
+    currentPrice: data.currentPrice,
+    exchangeRate: data.exchangeRate,
+    quoteUpdatedAt: data.quoteUpdatedAt,
+    exchangeRateUpdatedAt: data.exchangeRateUpdatedAt,
+    updatedAt: data.updatedAt,
+  };
+  dividends = data.dividends;
+  elements.currentPrice.value = state.currentPrice;
+  elements.exchangeRate.value = state.exchangeRate;
+  updateSaveStatus();
+  render();
+  if (options.sync !== false) scheduleCloudWrite();
+  return true;
+}
+
+function scheduleCloudWrite(delay = 1000) {
+  if (!currentUser || !userDocument || !cloudInitialResolved || syncPausedForConflict || accountSwitchApproved) return;
+  if (cloudSyncTimer !== null) window.clearTimeout(cloudSyncTimer);
+  setSyncStatus(navigator.onLine ? 'Syncing…' : 'Offline', navigator.onLine ? 'syncing' : 'offline');
+  if (!navigator.onLine) {
+    cloudWriteQueued = true;
+    return;
+  }
+  cloudSyncTimer = window.setTimeout(() => {
+    cloudSyncTimer = null;
+    void writeCloudData(currentTrackerData());
+  }, delay);
+}
+
+async function writeCloudData(data) {
+  if (!currentUser || !userDocument || !cloudInitialResolved || syncPausedForConflict || accountSwitchApproved) return false;
+  if (!stateWritable || !dividendsWritable) {
+    setSyncStatus('Sync blocked by local storage error', 'error');
+    return false;
+  }
+  if (!navigator.onLine) {
+    cloudWriteQueued = true;
+    setSyncStatus('Offline', 'offline');
+    return false;
+  }
+  if (cloudSyncInProgress) {
+    cloudWriteQueued = true;
+    return false;
+  }
+  const generation = cloudListenerGeneration;
+  const targetDocument = userDocument;
+  cloudSyncInProgress = true;
+  cloudWriteQueued = false;
+  setSyncStatus('Syncing…', 'syncing');
+  try {
+    await targetDocument.set({
+      ...data,
+      clientUpdatedAt: data.updatedAt,
+      updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+    });
+    if (generation === cloudListenerGeneration) {
+      if (rememberSyncOwner(currentUser.uid)) setSyncStatus('Synced ✓', 'synced');
+    }
+    return true;
+  } catch (error) {
+    if (generation === cloudListenerGeneration) {
+      setSyncStatus(navigator.onLine ? `Sync error: ${error.message}` : 'Offline', navigator.onLine ? 'error' : 'offline', error.message);
+    }
+    return false;
+  } finally {
+    if (generation === cloudListenerGeneration) {
+      cloudSyncInProgress = false;
+      if (cloudWriteQueued && navigator.onLine) scheduleCloudWrite(0);
+    }
+  }
+}
+
+function requestSyncChoice() {
+  return new Promise((resolve) => {
+    const dialog = elements.syncConflictDialog;
+    const handleClose = () => resolve(dialog.returnValue || 'cancel');
+    dialog.addEventListener('close', handleClose, { once: true });
+    dialog.showModal();
+  });
+}
+
+async function resolveInitialCloudData(snapshot, generation) {
+  let remote = snapshot.exists ? normalizeCloudData(snapshot.data()) : {
+    buys: [],
+    dividends: [],
+    currentPrice: '',
+    exchangeRate: '',
+    quoteUpdatedAt: null,
+    exchangeRateUpdatedAt: null,
+    updatedAt: 0,
+  };
+  const local = currentTrackerData();
+  const localHasRecords = trackerDataHasRecords(local);
+  const remoteHasRecords = trackerDataHasRecords(remote);
+
+  if (accountSwitchApproved) {
+    cloudInitialResolved = true;
+    if (persistLocalTrackerData(remote, { sync: false })) {
+      accountSwitchApproved = false;
+      if (rememberSyncOwner(currentUser.uid)) setSyncStatus('Synced ✓', 'synced');
+    }
+    return;
+  }
+
+  if (localHasRecords && remoteHasRecords) {
+    const choice = await requestSyncChoice();
+    if (generation !== cloudListenerGeneration) return;
+    if (choice === 'cancel') {
+      syncPausedForConflict = true;
+      setSyncStatus('Sync paused', 'error', 'Sign out and back in to choose a sync option.');
+      return;
+    }
+    if (pendingCloudSnapshot) {
+      const latest = pendingCloudSnapshot;
+      pendingCloudSnapshot = null;
+      remote = latest.exists ? normalizeCloudData(latest.data()) : {
+        buys: [],
+        dividends: [],
+        currentPrice: '',
+        exchangeRate: '',
+        quoteUpdatedAt: null,
+        exchangeRateUpdatedAt: null,
+        updatedAt: 0,
+      };
+    }
+    const merged = mergeTrackerData(currentTrackerData(), remote, choice);
+    cloudInitialResolved = true;
+    if (persistLocalTrackerData(merged, { sync: false })) {
+      if (choice !== 'cloud' || stableTrackerData(merged) !== stableTrackerData(remote)) {
+        await writeCloudData(currentTrackerData());
+      } else {
+        if (rememberSyncOwner(currentUser.uid)) setSyncStatus('Synced ✓', 'synced');
+      }
+    }
+    return;
+  }
+
+  const merged = mergeTrackerData(local, remote);
+  cloudInitialResolved = true;
+  if (!snapshot.exists && trackerDataHasContent(local)) {
+    if (!persistLocalTrackerData(local, { sync: false })) return;
+    await writeCloudData(local);
+    return;
+  }
+  if (stableTrackerData(merged) !== stableTrackerData(local)
+    || merged.updatedAt > local.updatedAt
+    || localNeedsRecordMetadata()) {
+    if (!persistLocalTrackerData(merged, { sync: false })) return;
+  }
+  if (stableTrackerData(merged) !== stableTrackerData(remote)) {
+    await writeCloudData(currentTrackerData());
+  } else {
+    if (rememberSyncOwner(currentUser.uid)) setSyncStatus('Synced ✓', 'synced');
+  }
+}
+
+function handleCloudSnapshot(snapshot, generation = cloudListenerGeneration) {
+  if (generation !== cloudListenerGeneration || !currentUser || syncPausedForConflict) return;
+  if (!cloudInitialResolved) {
+    if (snapshot.metadata?.fromCache) {
+      setSyncStatus(navigator.onLine ? 'Syncing…' : 'Offline', navigator.onLine ? 'syncing' : 'offline');
+      return;
+    }
+    if (cloudInitialResolution) {
+      pendingCloudSnapshot = snapshot;
+      return;
+    }
+    cloudInitialResolution = resolveInitialCloudData(snapshot, generation)
+      .catch((error) => {
+        if (generation === cloudListenerGeneration) setSyncStatus(`Sync error: ${error.message}`, 'error', error.message);
+      })
+      .finally(() => {
+        if (generation !== cloudListenerGeneration) return;
+        cloudInitialResolution = null;
+        const pending = pendingCloudSnapshot;
+        pendingCloudSnapshot = null;
+        if (pending && cloudInitialResolved) handleCloudSnapshot(pending, generation);
+      });
+    return;
+  }
+  if (snapshot.metadata?.hasPendingWrites) return;
+  if (!snapshot.exists) {
+    setSyncStatus('Cloud data unavailable', 'error', 'The signed-in tracker document was removed.');
+    return;
+  }
+  try {
+    const remote = normalizeCloudData(snapshot.data());
+    const local = currentTrackerData();
+    const merged = mergeTrackerData(local, remote);
+    const localChanged = stableTrackerData(merged) !== stableTrackerData(local);
+    const localTimestampBehind = merged.updatedAt > local.updatedAt;
+    const cloudChanged = stableTrackerData(merged) !== stableTrackerData(remote);
+    if ((localChanged || localTimestampBehind || localNeedsRecordMetadata())
+      && !persistLocalTrackerData(merged, { sync: false })) return;
+    if (cloudChanged) {
+      scheduleCloudWrite();
+    } else {
+      setSyncStatus('Synced ✓', 'synced');
+    }
+  } catch (error) {
+    setSyncStatus(`Sync error: ${error.message}`, 'error', error.message);
+  }
+}
+
+function connectCloudListener() {
+  if (!currentUser || !firestore || userDocument) return;
+  const generation = cloudListenerGeneration;
+  userDocument = firestore.doc(`users/${currentUser.uid}/tracker/data`);
+  unsubscribeCloud = userDocument.onSnapshot(
+    (snapshot) => handleCloudSnapshot(snapshot, generation),
+    (error) => {
+      if (generation === cloudListenerGeneration) setSyncStatus(`Sync error: ${error.message}`, 'error', error.message);
+    },
+  );
+}
+
+function handleAuthStateChange(user) {
+  cloudListenerGeneration += 1;
+  if (unsubscribeCloud) unsubscribeCloud();
+  if (cloudSyncTimer !== null) window.clearTimeout(cloudSyncTimer);
+  cloudSyncTimer = null;
+  currentUser = user;
+  userDocument = null;
+  cloudInitialResolved = false;
+  cloudInitialResolution = null;
+  syncPausedForConflict = false;
+  cloudWriteQueued = false;
+  cloudSyncInProgress = false;
+  pendingCloudSnapshot = null;
+  accountSwitchApproved = false;
+  elements.signInButton.textContent = user ? 'Sign out' : 'Sign in with Google';
+  if (!user) {
+    setSyncStatus(firebaseConfigIsReady() ? 'Not signed in' : 'Sync setup needed', 'idle');
+    return;
+  }
+  try {
+    const previousOwner = localStorage.getItem(SYNC_OWNER_STORAGE_KEY);
+    if (previousOwner && previousOwner !== user.uid) {
+      const useCloud = window.confirm(
+        'This browser has tracker data previously synced to a different Google account. Continuing will replace this browser’s local data with the selected account’s cloud data. Export a backup first if you need the current local data. Continue?',
+      );
+      if (!useCloud) {
+        syncPausedForConflict = true;
+        setSyncStatus('Sync paused', 'error', 'Sign out to keep using the current local data.');
+        return;
+      }
+      accountSwitchApproved = true;
+    }
+  } catch (error) {
+    syncPausedForConflict = true;
+    setSyncStatus(`Sync error: ${error.message}`, 'error', error.message);
+    return;
+  }
+  if (!navigator.onLine) {
+    setSyncStatus('Offline', 'offline');
+    return;
+  }
+  setSyncStatus('Syncing…', 'syncing');
+  connectCloudListener();
+}
+
+function initializeCloudSync() {
+  if (!firebaseConfigIsReady()) {
+    setSyncStatus('Sync setup needed', 'idle', 'Paste the Firebase web config into firebase-config.js.');
+    return;
+  }
+  if (typeof firebase === 'undefined') {
+    setSyncStatus('Sync SDK unavailable', 'error', 'The Firebase SDK could not be loaded from the official CDN.');
+    return;
+  }
+  try {
+    const app = firebase.apps.length ? firebase.app() : firebase.initializeApp(window.FIELDNOTES_FIREBASE_CONFIG);
+    firebaseAuth = app.auth();
+    firestore = app.firestore();
+    firebaseAuth.onAuthStateChanged(handleAuthStateChange, (error) => {
+      setSyncStatus(`Sync error: ${error.message}`, 'error', error.message);
+    });
+    firebaseAuth.getRedirectResult().catch((error) => {
+      setSyncStatus(`Sign-in error: ${error.message}`, 'error', error.message);
+    });
+  } catch (error) {
+    setSyncStatus(`Sync error: ${error.message}`, 'error', error.message);
+  }
+}
+
+async function toggleGoogleSignIn() {
+  if (!firebaseConfigIsReady()) {
+    setSyncStatus('Sync setup needed', 'idle', 'Paste the Firebase web config into firebase-config.js.');
+    window.alert('Add your Firebase web app config to firebase-config.js before signing in.');
+    return;
+  }
+  if (!firebaseAuth) {
+    window.alert('Firebase could not initialize. Check your Firebase config and network connection.');
+    return;
+  }
+  elements.signInButton.disabled = true;
+  try {
+    if (firebaseAuth.currentUser) {
+      await firebaseAuth.signOut();
+    } else {
+      const provider = new firebase.auth.GoogleAuthProvider();
+      if (window.matchMedia('(max-width: 760px)').matches) {
+        await firebaseAuth.signInWithRedirect(provider);
+      } else {
+        await firebaseAuth.signInWithPopup(provider);
+      }
+    }
+  } catch (error) {
+    setSyncStatus(`Sign-in error: ${error.message}`, 'error', error.message);
+  } finally {
+    elements.signInButton.disabled = false;
+  }
+}
+
+window.addEventListener('offline', () => {
+  if (currentUser) setSyncStatus('Offline', 'offline');
+});
+window.addEventListener('online', () => {
+  if (!currentUser) return;
+  if (!userDocument) connectCloudListener();
+  else if (cloudInitialResolved) scheduleCloudWrite(0);
+});
 
 function numberFrom(input) {
   const value = Number.parseFloat(input.value);
@@ -164,7 +705,9 @@ function isValidBuy(buy) {
     && Number.isFinite(buy.price)
     && buy.price > 0
     && isValidDate(buy.date)
-    && (buy.purchaseExchangeRate === undefined || (Number.isFinite(buy.purchaseExchangeRate) && buy.purchaseExchangeRate > 0)),
+    && (buy.purchaseExchangeRate === undefined || (Number.isFinite(buy.purchaseExchangeRate) && buy.purchaseExchangeRate > 0))
+    && (buy.updatedAt === undefined || (Number.isFinite(buy.updatedAt) && buy.updatedAt >= 0))
+    && (buy.deleted === undefined || typeof buy.deleted === 'boolean'),
   );
 }
 
@@ -177,7 +720,9 @@ function isValidDividend(dividend) {
     && isValidDate(dividend.date)
     && Number.isFinite(dividend.amount)
     && dividend.amount > 0
-    && (dividend.reinvested === undefined || typeof dividend.reinvested === 'boolean'),
+    && (dividend.reinvested === undefined || typeof dividend.reinvested === 'boolean')
+    && (dividend.updatedAt === undefined || (Number.isFinite(dividend.updatedAt) && dividend.updatedAt >= 0))
+    && (dividend.deleted === undefined || typeof dividend.deleted === 'boolean'),
   );
 }
 
@@ -194,7 +739,7 @@ function svgElement(name, attributes = {}) {
 function drawPriceChart() {
   const svg = document.querySelector('#price-chart');
   const empty = document.querySelector('#chart-empty');
-  const buys = [...state.buys].sort((first, second) => (first.date || '').localeCompare(second.date || ''));
+  const buys = state.buys.filter((buy) => !buy.deleted).sort((first, second) => (first.date || '').localeCompare(second.date || ''));
   svg.replaceChildren(svg.querySelector('desc'));
   elements.chartTooltip.hidden = true;
   svg.hidden = buys.length === 0;
@@ -409,20 +954,22 @@ function dismissUndoToasts(kind) {
 function render() {
   const currentPrice = numberFrom(elements.currentPrice);
   const exchangeRate = numberFrom(elements.exchangeRate);
-  const shares = state.buys.reduce((total, buy) => total + buy.shares, 0);
-  const invested = state.buys.reduce((total, buy) => total + buy.shares * buy.price, 0);
+  const activeBuys = state.buys.filter((buy) => !buy.deleted);
+  const activeDividends = dividends.filter((dividend) => !dividend.deleted);
+  const shares = activeBuys.reduce((total, buy) => total + buy.shares, 0);
+  const invested = activeBuys.reduce((total, buy) => total + buy.shares * buy.price, 0);
   const currentValue = currentPrice ? shares * currentPrice : 0;
   const profit = currentPrice ? currentValue - invested : 0;
-  const dividendsTotal = dividends.reduce((total, dividend) => total + dividend.amount, 0);
+  const dividendsTotal = activeDividends.reduce((total, dividend) => total + dividend.amount, 0);
   const totalProfit = profit + dividendsTotal;
   const returnPercent = invested && (currentPrice || dividendsTotal) ? (totalProfit / invested) * 100 : 0;
-  const investedIls = state.buys.reduce((total, buy) => {
+  const investedIls = activeBuys.reduce((total, buy) => {
     const purchaseRate = Number.isFinite(buy.purchaseExchangeRate) && buy.purchaseExchangeRate > 0 ? buy.purchaseExchangeRate : exchangeRate;
     return total + buy.shares * buy.price * purchaseRate;
   }, 0);
   const currentValueIls = currentPrice ? shares * currentPrice * exchangeRate : 0;
   const profitIls = currentValueIls - investedIls;
-  const fxAdjustment = state.buys.reduce((total, buy) => {
+  const fxAdjustment = activeBuys.reduce((total, buy) => {
     const purchaseRate = Number.isFinite(buy.purchaseExchangeRate) && buy.purchaseExchangeRate > 0 ? buy.purchaseExchangeRate : exchangeRate;
     return total + buy.shares * buy.price * Math.max(exchangeRate - purchaseRate, 0);
   }, 0);
@@ -446,13 +993,13 @@ function render() {
   document.querySelector('#invested-value').textContent = money(invested);
   document.querySelector('#current-value').textContent = money(currentValue);
   document.querySelector('#dividend-total').textContent = money(dividendsTotal);
-  document.querySelector('#lot-count').textContent = state.buys.length.toString();
-  document.querySelector('#heading-count').textContent = `(${state.buys.length})`;
-  document.querySelector('#dividend-count').textContent = `(${dividends.length})`;
+  document.querySelector('#lot-count').textContent = activeBuys.length.toString();
+  document.querySelector('#heading-count').textContent = `(${activeBuys.length})`;
+  document.querySelector('#dividend-count').textContent = `(${activeDividends.length})`;
 
   elements.list.replaceChildren();
-  const sortedBuys = [...state.buys].sort((first, second) => (second.date || '').localeCompare(first.date || ''));
-  if (state.buys.length <= 8) showAllBuys = false;
+  const sortedBuys = [...activeBuys].sort((first, second) => (second.date || '').localeCompare(first.date || ''));
+  if (activeBuys.length <= 8) showAllBuys = false;
   const visibleBuys = showAllBuys ? sortedBuys : sortedBuys.slice(0, 8);
   for (const buy of visibleBuys) {
     const row = document.createElement('tr');
@@ -482,12 +1029,15 @@ function render() {
     remove.disabled = !stateWritable;
     remove.setAttribute('aria-label', `Remove buy of ${buy.shares} shares at ${money(buy.price)}`);
     remove.addEventListener('click', () => {
-      state.buys = state.buys.filter((item) => item.id !== buy.id);
+      state.buys = state.buys.map((item) => item.id === buy.id
+        ? { ...item, deleted: true, updatedAt: nextUpdatedAt(item.updatedAt) }
+        : item);
       saveState();
       render();
       showUndoToast('buy', 'Buy lot deleted.', () => {
-        if (state.buys.some((item) => item.id === buy.id)) return;
-        state.buys.push(buy);
+        state.buys = state.buys.map((item) => item.id === buy.id
+          ? { ...item, deleted: false, updatedAt: nextUpdatedAt(item.updatedAt) }
+          : item);
         saveState();
         render();
       });
@@ -497,16 +1047,16 @@ function render() {
     elements.list.append(row);
   }
 
-  const isEmpty = state.buys.length === 0;
+  const isEmpty = activeBuys.length === 0;
   elements.emptyState.classList.toggle('visible', isEmpty);
   elements.list.hidden = isEmpty;
   elements.clearAll.hidden = isEmpty;
-  elements.toggleBuyList.hidden = state.buys.length <= 8;
-  elements.toggleBuyList.textContent = showAllBuys ? 'Show less' : `Show all (${state.buys.length})`;
+  elements.toggleBuyList.hidden = activeBuys.length <= 8;
+  elements.toggleBuyList.textContent = showAllBuys ? 'Show less' : `Show all (${activeBuys.length})`;
   document.querySelector('#return-caption').textContent = currentPrice ? 'Includes logged dividend payouts' : 'Enter a SPY price to see your return';
 
   elements.dividendList.replaceChildren();
-  for (const dividend of [...dividends].sort((first, second) => second.date.localeCompare(first.date))) {
+  for (const dividend of [...activeDividends].sort((first, second) => second.date.localeCompare(first.date))) {
     const row = document.createElement('tr');
     const dateCell = document.createElement('td');
     dateCell.className = 'date-cell';
@@ -524,12 +1074,15 @@ function render() {
     remove.disabled = !dividendsWritable;
     remove.setAttribute('aria-label', `Remove dividend of ${money(dividend.amount)}`);
     remove.addEventListener('click', () => {
-      dividends = dividends.filter((item) => item.id !== dividend.id);
+      dividends = dividends.map((item) => item.id === dividend.id
+        ? { ...item, deleted: true, updatedAt: nextUpdatedAt(item.updatedAt) }
+        : item);
       saveDividends();
       render();
       showUndoToast('dividend', 'Dividend deleted.', () => {
-        if (dividends.some((item) => item.id === dividend.id)) return;
-        dividends.push(dividend);
+        dividends = dividends.map((item) => item.id === dividend.id
+          ? { ...item, deleted: false, updatedAt: nextUpdatedAt(item.updatedAt) }
+          : item);
         saveDividends();
         render();
       });
@@ -554,8 +1107,8 @@ function exportBackup() {
     exchangeRate: state.exchangeRate,
     quoteUpdatedAt: state.quoteUpdatedAt,
     exchangeRateUpdatedAt: state.exchangeRateUpdatedAt,
-    buys: state.buys,
-    dividends,
+    buys: state.buys.filter((buy) => !buy.deleted),
+    dividends: dividends.filter((dividend) => !dividend.deleted),
   };
   const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
@@ -610,32 +1163,17 @@ function mergeById(existing, incoming) {
 }
 
 function saveImportedBackup(nextState, nextDividends) {
-  let previousDividends;
-  try {
-    previousDividends = localStorage.getItem(DIVIDEND_STORAGE_KEY);
-    localStorage.setItem(DIVIDEND_STORAGE_KEY, JSON.stringify(nextDividends));
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(nextState));
-  } catch (error) {
-    try {
-      if (previousDividends === null) localStorage.removeItem(DIVIDEND_STORAGE_KEY);
-      else if (previousDividends !== undefined) localStorage.setItem(DIVIDEND_STORAGE_KEY, previousDividends);
-    } catch {
-      dividendsWritable = false;
-    }
-    stateWritable = false;
-    updateSaveStatus();
-    window.alert(`The backup could not be saved. Existing data was preserved where possible. ${error.message}`);
-    return false;
-  }
-  state = nextState;
-  dividends = nextDividends;
   stateWritable = true;
   dividendsWritable = true;
-  elements.currentPrice.value = state.currentPrice;
-  elements.exchangeRate.value = state.exchangeRate;
-  updateSaveStatus();
-  render();
-  return true;
+  const nextData = {
+    ...nextState,
+    buys: nextState.buys.map((buy) => ({ ...buy, updatedAt: Number.isFinite(buy.updatedAt) ? buy.updatedAt : nextUpdatedAt() })),
+    dividends: nextDividends.map((dividend) => ({ ...dividend, updatedAt: Number.isFinite(dividend.updatedAt) ? dividend.updatedAt : nextUpdatedAt() })),
+    updatedAt: nextUpdatedAt(nextState.updatedAt),
+  };
+  if (persistLocalTrackerData(nextData, { sync: true })) return true;
+  window.alert('The backup could not be saved. Existing data was preserved where possible.');
+  return false;
 }
 
 async function importBackup(file) {
@@ -645,9 +1183,31 @@ async function importBackup(file) {
     const replace = window.confirm('Replace all saved buys, dividends, and market values with this backup? Select Cancel to merge.');
     const merge = replace || window.confirm('Merge this backup with the saved buys and dividends? Existing market values will be kept.');
     if (!merge) return;
+    const now = nextUpdatedAt(state.updatedAt);
+    const importedBuys = backup.buys.map((buy) => ({ ...buy, updatedAt: now }));
+    const importedDividends = backup.dividends.map((dividend) => ({
+      ...dividend,
+      updatedAt: now,
+    }));
+    const replacementBuys = replace
+      ? [
+        ...importedBuys,
+        ...state.buys.filter((buy) => buy.deleted && !importedBuys.some((incoming) => incoming.id === buy.id)),
+        ...state.buys.filter((buy) => !buy.deleted && !backup.buys.some((incoming) => incoming.id === buy.id))
+          .map((buy) => ({ ...buy, deleted: true, updatedAt: now })),
+      ]
+      : mergeById(state.buys, importedBuys);
+    const replacementDividends = replace
+      ? [
+        ...importedDividends,
+        ...dividends.filter((dividend) => dividend.deleted && !importedDividends.some((incoming) => incoming.id === dividend.id)),
+        ...dividends.filter((dividend) => !dividend.deleted && !backup.dividends.some((incoming) => incoming.id === dividend.id))
+          .map((dividend) => ({ ...dividend, deleted: true, updatedAt: now })),
+      ]
+      : mergeById(dividends, importedDividends);
     const nextState = replace
       ? {
-        buys: backup.buys,
+        buys: replacementBuys,
         currentPrice: backup.currentPrice,
         exchangeRate: backup.exchangeRate,
         quoteUpdatedAt: backup.quoteUpdatedAt,
@@ -655,11 +1215,11 @@ async function importBackup(file) {
       }
       : {
         ...state,
-        buys: mergeById(state.buys, backup.buys),
+        buys: replacementBuys,
         currentPrice: state.currentPrice || backup.currentPrice,
         exchangeRate: state.exchangeRate || backup.exchangeRate,
       };
-    const nextDividends = replace ? backup.dividends : mergeById(dividends, backup.dividends);
+    const nextDividends = replacementDividends;
     if (saveImportedBackup(nextState, nextDividends)) window.alert('Backup imported successfully.');
   } catch (error) {
     window.alert(`Could not import backup: ${error.message}`);
@@ -679,6 +1239,7 @@ elements.form.addEventListener('submit', (event) => {
     shares,
     price,
     date: elements.buyDate.value || new Date().toISOString().slice(0, 10),
+    updatedAt: nextUpdatedAt(state.updatedAt),
   };
   if (purchaseExchangeRate) buy.purchaseExchangeRate = purchaseExchangeRate;
   state.buys.push(buy);
@@ -697,6 +1258,7 @@ elements.dividendForm.addEventListener('submit', (event) => {
     date: elements.dividendDate.value,
     amount,
     reinvested: elements.dividendReinvested.checked,
+    updatedAt: nextUpdatedAt(state.updatedAt),
   });
   saveDividends();
   elements.dividendForm.reset();
@@ -724,7 +1286,9 @@ elements.refreshQuote.addEventListener('click', refreshQuote);
 elements.clearAll.addEventListener('click', () => {
   if (!window.confirm('Remove all SPY buys? Logged dividends will remain saved. This cannot be undone.')) return;
   dismissUndoToasts('buy');
-  state.buys = [];
+  state.buys = state.buys.map((buy) => buy.deleted
+    ? buy
+    : { ...buy, deleted: true, updatedAt: nextUpdatedAt(buy.updatedAt) });
   showAllBuys = false;
   saveState();
   render();
@@ -741,6 +1305,7 @@ elements.backupFile.addEventListener('change', () => {
   const [file] = elements.backupFile.files;
   if (file) importBackup(file);
 });
+elements.signInButton.addEventListener('click', toggleGoogleSignIn);
 
 elements.currentPrice.value = state.currentPrice;
 elements.exchangeRate.value = state.exchangeRate;
@@ -754,4 +1319,5 @@ if (!hasLocalQuoteApi) {
 }
 render();
 refreshQuote();
+initializeCloudSync();
 window.setInterval(refreshQuote, hasLocalQuoteApi ? 5 * 60 * 1000 : 15 * 60 * 1000);

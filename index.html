@@ -3,9 +3,13 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#f4f6f0">
+  <meta name="theme-color" content="#0A0A18">
   <title>SPY Buy Tracker</title>
   <link rel="stylesheet" href="styles.css">
+  <script defer src="https://www.gstatic.com/firebasejs/10.12.5/firebase-app-compat.js"></script>
+  <script defer src="https://www.gstatic.com/firebasejs/10.12.5/firebase-auth-compat.js"></script>
+  <script defer src="https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore-compat.js"></script>
+  <script defer src="firebase-config.js"></script>
   <script src="app.js" defer></script>
 </head>
 <body>
@@ -15,7 +19,11 @@
         <span class="brand-mark" aria-hidden="true">S</span>
         <span>Fieldnotes <span class="brand-divider">/</span> SPY</span>
       </a>
-      <span class="save-status" id="save-status"><span class="status-dot"></span> Saved on this device</span>
+      <div class="topbar-actions">
+        <button class="sync-button" id="sign-in-button" type="button">Sign in with Google</button>
+        <span class="sync-status" id="sync-status" role="status" aria-live="polite" title="Configure Firebase to enable sync">Sync setup needed</span>
+        <span class="save-status" id="save-status"><span class="status-dot"></span> Saved on this device</span>
+      </div>
     </header>
 
     <main id="top">
@@ -195,9 +203,22 @@
           </div>
         </div>
       </section>
-      <footer class="page-footer"><span>FIELDNOTES <span aria-hidden="true">·</span> SPY TRACKER</span><span>Data stays in this browser</span></footer>
+      <footer class="page-footer"><span>FIELDNOTES <span aria-hidden="true">·</span> SPY TRACKER</span><span>Local-first · optional cloud sync</span></footer>
     </main>
   </div>
   <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="false"></div>
+  <dialog class="sync-conflict" id="sync-conflict-dialog" aria-labelledby="sync-conflict-title">
+    <form method="dialog">
+      <p class="eyebrow">FIRST SYNC</p>
+      <h2 id="sync-conflict-title">Both this device and your cloud account have tracker data.</h2>
+      <p>Choose which data to use. Merge keeps both lists and removes matching buy lots.</p>
+      <div class="sync-conflict-actions">
+        <button class="text-button" type="submit" value="cloud">Use cloud data</button>
+        <button class="text-button" type="submit" value="device">Use this device's data</button>
+        <button class="add-button" type="submit" value="merge">Merge</button>
+        <button class="text-button" type="submit" value="cancel">Not now</button>
+      </div>
+    </form>
+  </dialog>
 </body>
 </html>
