@@ -48,7 +48,7 @@
 
       <section class="summary-grid" aria-label="Portfolio summary">
         <article class="metric-card metric-primary">
-          <div class="metric-label">TOTAL RETURN <span class="metric-icon" aria-hidden="true">↗</span></div>
+          <div class="metric-label">TOTAL RETURN <span class="metric-icon" id="return-direction" aria-hidden="true">▲</span></div>
           <div class="metric-value" id="return-percent">0.00%</div>
           <p class="metric-foot" id="return-caption">Based on your invested amount</p>
         </article>
@@ -85,6 +85,7 @@
           <div>
             <p class="eyebrow">YOUR COST BASIS</p>
             <h2 id="chart-title">Average buy vs. market</h2>
+            <p class="chart-caption">Average buy is weighted by shares.</p>
           </div>
           <div class="chart-legend" aria-label="Chart legend">
             <span><i class="legend-average"></i>Average buy</span>
@@ -96,6 +97,7 @@
           <svg id="price-chart" viewBox="0 0 800 300" role="img" aria-labelledby="chart-title chart-description" preserveAspectRatio="xMidYMid meet">
             <desc id="chart-description">Cumulative average purchase price, individual buy prices, and current SPY price over time.</desc>
           </svg>
+          <div class="chart-tooltip" id="chart-tooltip" role="tooltip" hidden></div>
           <p class="chart-empty" id="chart-empty" hidden>Add a buy lot to see your cost basis over time.</p>
         </div>
       </section>
@@ -135,7 +137,7 @@
         </form>
 
         <div class="table-wrap">
-          <table>
+          <table class="buy-table">
             <thead>
               <tr>
                 <th scope="col">DATE</th>
@@ -154,6 +156,9 @@
             <p>No buys yet</p>
             <span>Add your first SPY buy above to start tracking.</span>
           </div>
+        </div>
+        <div class="table-controls">
+          <button class="text-button" id="toggle-buy-list" type="button" hidden>Show all</button>
         </div>
       </section>
 
@@ -193,5 +198,6 @@
       <footer class="page-footer"><span>FIELDNOTES <span aria-hidden="true">·</span> SPY TRACKER</span><span>Data stays in this browser</span></footer>
     </main>
   </div>
+  <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="false"></div>
 </body>
 </html>

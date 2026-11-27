@@ -17,6 +17,7 @@ const elements = {
   refreshQuote: document.querySelector('#refresh-quote'),
   list: document.querySelector('#buy-list'),
   emptyState: document.querySelector('#empty-state'),
+  toggleBuyList: document.querySelector('#toggle-buy-list'),
   clearAll: document.querySelector('#clear-all'),
   exportBackup: document.querySelector('#export-backup'),
   importBackup: document.querySelector('#import-backup'),
@@ -28,6 +29,9 @@ const elements = {
   dividendReinvested: document.querySelector('#dividend-reinvested'),
   dividendList: document.querySelector('#dividend-list'),
   dividendEmpty: document.querySelector('#dividend-empty'),
+  chartTooltip: document.querySelector('#chart-tooltip'),
+  returnDirection: document.querySelector('#return-direction'),
+  toastRegion: document.querySelector('#toast-region'),
 };
 
 function loadState() {
@@ -68,6 +72,7 @@ function loadDividends() {
 }
 
 let dividends = loadDividends();
+let showAllBuys = false;
 
 function saveState() {
   if (!stateWritable) return false;
@@ -191,6 +196,7 @@ function drawPriceChart() {
   const empty = document.querySelector('#chart-empty');
   const buys = [...state.buys].sort((first, second) => (first.date || '').localeCompare(second.date || ''));
   svg.replaceChildren(svg.querySelector('desc'));
+  elements.chartTooltip.hidden = true;
   svg.hidden = buys.length === 0;
   empty.hidden = buys.length > 0;
   if (!buys.length) return;
@@ -226,7 +232,16 @@ function drawPriceChart() {
   if (currentPrice) {
     const y = yFor(currentPrice);
     svg.append(svgElement('line', { x1: plot.left, x2: plot.right, y1: y, y2: y, class: 'chart-market-line' }));
-    const label = svgElement('text', { x: plot.right - 2, y: y - 7, 'text-anchor': 'end', class: 'chart-market-label' });
+    const pillY = Math.max(plot.top + 2, Math.min(y - 27, plot.bottom - 24));
+    svg.append(svgElement('rect', {
+      x: plot.left + 8,
+      y: pillY,
+      width: 132,
+      height: 21,
+      rx: 5,
+      class: 'chart-market-pill',
+    }));
+    const label = svgElement('text', { x: plot.left + 16, y: pillY + 15, class: 'chart-market-label' });
     label.textContent = `Market $${currentPrice.toFixed(2)}`;
     svg.append(label);
   }
@@ -240,10 +255,66 @@ function drawPriceChart() {
   });
   const path = averagePoints.map((point, index) => `${index ? 'L' : 'M'} ${point.x} ${point.y}`).join(' ');
   svg.append(svgElement('path', { d: path, class: 'chart-average-line' }));
-  for (let index = 0; index < buys.length; index += 1) {
-    svg.append(svgElement('circle', { cx: xFor(index), cy: yFor(buys[index].price), r: 4, class: 'chart-purchase-point' }));
-  }
   for (const point of averagePoints) svg.append(svgElement('circle', { cx: point.x, cy: point.y, r: 3, class: 'chart-average-point' }));
+
+  const activeDotLayer = svgElement('g', { 'aria-hidden': 'true' });
+  for (let index = 0; index < buys.length; index += 1) {
+    const buy = buys[index];
+    const x = xFor(index);
+    const y = yFor(buy.price);
+    const buyValue = buy.shares * buy.price;
+    const lotReturn = currentPrice && buyValue ? ((buy.shares * currentPrice - buyValue) / buyValue) * 100 : null;
+    const returnText = lotReturn === null ? '—' : `${lotReturn > 0 ? '+' : ''}${lotReturn.toFixed(2)}%`;
+    const details = `${formatDate(buy.date)} · ${buy.shares.toLocaleString('en-US', { maximumFractionDigits: 6 })} shares\nBuy price ${money(buy.price)} · Return ${returnText}`;
+    const mark = svgElement('g', {
+      class: 'chart-purchase-mark',
+      tabindex: '0',
+      role: 'img',
+      'aria-label': details.replace('\n', '. '),
+      'aria-describedby': 'chart-tooltip',
+    });
+    const hit = svgElement('circle', { cx: x, cy: y, r: 24, class: 'chart-purchase-hit' });
+    const dot = svgElement('circle', { cx: x, cy: y, r: 4, class: 'chart-purchase-point' });
+    const title = svgElement('title');
+    title.textContent = details.replace('\n', ' · ');
+    mark.append(hit, dot, title);
+
+    const showTooltip = () => {
+      elements.chartTooltip.textContent = details;
+      elements.chartTooltip.hidden = false;
+      mark.classList.add('is-active');
+      activeDotLayer.replaceChildren(svgElement('circle', { cx: x, cy: y, r: 8, class: 'chart-purchase-active' }));
+      const point = svg.createSVGPoint();
+      point.x = x;
+      point.y = y;
+      const transform = svg.getScreenCTM();
+      if (!transform) return;
+      const screenPoint = point.matrixTransform(transform);
+      const cardRect = svg.parentElement.getBoundingClientRect();
+      const tooltipRect = elements.chartTooltip.getBoundingClientRect();
+      const left = Math.max(8, Math.min(
+        screenPoint.x - cardRect.left - tooltipRect.width / 2,
+        cardRect.width - tooltipRect.width - 8,
+      ));
+      const above = screenPoint.y - cardRect.top - tooltipRect.height - 12;
+      const top = above >= 8 ? above : Math.min(cardRect.height - tooltipRect.height - 8, screenPoint.y - cardRect.top + 12);
+      elements.chartTooltip.style.left = `${left}px`;
+      elements.chartTooltip.style.top = `${Math.max(8, top)}px`;
+    };
+    const hideTooltip = () => {
+      mark.classList.remove('is-active');
+      activeDotLayer.replaceChildren();
+      elements.chartTooltip.hidden = true;
+    };
+    mark.addEventListener('pointerenter', showTooltip);
+    mark.addEventListener('pointerleave', () => {
+      if (!mark.matches(':focus')) hideTooltip();
+    });
+    mark.addEventListener('focus', showTooltip);
+    mark.addEventListener('blur', hideTooltip);
+    svg.append(mark);
+  }
+  svg.append(activeDotLayer);
 
   const firstLabel = svgElement('text', { x: plot.left, y: 272, 'text-anchor': 'start', class: 'chart-axis-label' });
   firstLabel.textContent = formatDate(buys[0].date);
@@ -310,6 +381,31 @@ async function refreshQuote() {
   elements.refreshQuote.disabled = false;
 }
 
+function showUndoToast(kind, message, undo) {
+  const toast = document.createElement('div');
+  toast.className = 'undo-toast';
+  toast.dataset.kind = kind;
+  toast.setAttribute('role', 'status');
+  const label = document.createElement('span');
+  label.textContent = message;
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.textContent = 'Undo';
+  const timeout = window.setTimeout(() => toast.remove(), 6000);
+  button.addEventListener('click', () => {
+    window.clearTimeout(timeout);
+    toast.remove();
+    undo();
+  });
+  toast.append(label, button);
+  elements.toastRegion.append(toast);
+}
+
+function dismissUndoToasts(kind) {
+  const selector = kind ? `[data-kind="${kind}"]` : '.undo-toast';
+  for (const toast of elements.toastRegion.querySelectorAll(selector)) toast.remove();
+}
+
 function render() {
   const currentPrice = numberFrom(elements.currentPrice);
   const exchangeRate = numberFrom(elements.exchangeRate);
@@ -336,6 +432,9 @@ function render() {
 
   document.querySelector('#return-percent').textContent = `${returnPercent.toFixed(2)}%`;
   document.querySelector('#return-percent').classList.toggle('negative', returnPercent < 0);
+  elements.returnDirection.textContent = returnPercent < 0 ? '▼' : '▲';
+  elements.returnDirection.classList.toggle('negative', returnPercent < 0);
+  elements.returnDirection.title = returnPercent < 0 ? 'Negative total return' : 'Positive total return';
   document.querySelector('#profit-usd').textContent = signedMoney(totalProfit);
   document.querySelector('#profit-usd').classList.toggle('negative', totalProfit < 0);
   document.querySelector('#profit-ils').textContent = signedMoney(profitIls + dividendsTotal * exchangeRate, 'ILS');
@@ -352,7 +451,10 @@ function render() {
   document.querySelector('#dividend-count').textContent = `(${dividends.length})`;
 
   elements.list.replaceChildren();
-  for (const buy of [...state.buys].sort((first, second) => (second.date || '').localeCompare(first.date || ''))) {
+  const sortedBuys = [...state.buys].sort((first, second) => (second.date || '').localeCompare(first.date || ''));
+  if (state.buys.length <= 8) showAllBuys = false;
+  const visibleBuys = showAllBuys ? sortedBuys : sortedBuys.slice(0, 8);
+  for (const buy of visibleBuys) {
     const row = document.createElement('tr');
     const buyValue = buy.shares * buy.price;
     const lotValue = currentPrice ? buy.shares * currentPrice : 0;
@@ -360,7 +462,7 @@ function render() {
     const lotReturn = buyValue && currentPrice ? (lotProfit / buyValue) * 100 : 0;
     const cells = [
       { text: formatDate(buy.date), className: 'date-cell' },
-      { text: buy.shares.toLocaleString('en-US', { maximumFractionDigits: 6 }), className: 'numeric' },
+      { text: buy.shares.toFixed(4), className: 'numeric' },
       { text: money(buy.price), className: 'numeric' },
       { text: money(buyValue), className: 'numeric' },
       { text: currentPrice ? money(lotValue) : '—', className: 'numeric' },
@@ -383,6 +485,12 @@ function render() {
       state.buys = state.buys.filter((item) => item.id !== buy.id);
       saveState();
       render();
+      showUndoToast('buy', 'Buy lot deleted.', () => {
+        if (state.buys.some((item) => item.id === buy.id)) return;
+        state.buys.push(buy);
+        saveState();
+        render();
+      });
     });
     actionCell.append(remove);
     row.append(actionCell);
@@ -393,6 +501,8 @@ function render() {
   elements.emptyState.classList.toggle('visible', isEmpty);
   elements.list.hidden = isEmpty;
   elements.clearAll.hidden = isEmpty;
+  elements.toggleBuyList.hidden = state.buys.length <= 8;
+  elements.toggleBuyList.textContent = showAllBuys ? 'Show less' : `Show all (${state.buys.length})`;
   document.querySelector('#return-caption').textContent = currentPrice ? 'Includes logged dividend payouts' : 'Enter a SPY price to see your return';
 
   elements.dividendList.replaceChildren();
@@ -417,6 +527,12 @@ function render() {
       dividends = dividends.filter((item) => item.id !== dividend.id);
       saveDividends();
       render();
+      showUndoToast('dividend', 'Dividend deleted.', () => {
+        if (dividends.some((item) => item.id === dividend.id)) return;
+        dividends.push(dividend);
+        saveDividends();
+        render();
+      });
     });
     actionCell.append(remove);
     row.append(dateCell, amountCell, reinvestedCell, actionCell);
@@ -607,8 +723,15 @@ elements.refreshQuote.addEventListener('click', refreshQuote);
 
 elements.clearAll.addEventListener('click', () => {
   if (!window.confirm('Remove all SPY buys? Logged dividends will remain saved. This cannot be undone.')) return;
+  dismissUndoToasts('buy');
   state.buys = [];
+  showAllBuys = false;
   saveState();
+  render();
+});
+
+elements.toggleBuyList.addEventListener('click', () => {
+  showAllBuys = !showAllBuys;
   render();
 });
 
