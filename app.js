@@ -846,7 +846,8 @@ function drawPriceChart() {
     const buyValue = buy.shares * buy.price;
     const lotReturn = currentPrice && buyValue ? ((buy.shares * currentPrice - buyValue) / buyValue) * 100 : null;
     const returnText = lotReturn === null ? '—' : `${lotReturn > 0 ? '+' : ''}${lotReturn.toFixed(2)}%`;
-    const details = `${formatDate(buy.date)} · ${buy.shares.toLocaleString('en-US', { maximumFractionDigits: 6 })} shares\nBuy price ${money(buy.price)} · Return ${returnText}`;
+    const shareLabel = buy.shares === 1 ? 'share' : 'shares';
+    const details = `${formatDate(buy.date)} · ${buy.shares.toLocaleString('en-US', { maximumFractionDigits: 6 })} ${shareLabel}\nBuy price ${money(buy.price)} · Return ${returnText}`;
     const mark = svgElement('g', {
       class: 'chart-purchase-mark',
       tabindex: '0',
