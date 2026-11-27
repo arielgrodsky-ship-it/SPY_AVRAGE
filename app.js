@@ -49,6 +49,8 @@ let cloudSyncTimer = null;
 let syncPausedForConflict = false;
 let cloudSyncInProgress = false;
 let cloudWriteQueued = false;
+let cloudWriteFingerprint = null;
+let lastSyncedCloudFingerprint = null;
 let cloudListenerGeneration = 0;
 let pendingCloudSnapshot = null;
 let accountSwitchApproved = false;
@@ -348,6 +350,17 @@ function persistLocalTrackerData(data, options = {}) {
 
 function scheduleCloudWrite(delay = 1000) {
   if (!currentUser || !userDocument || !cloudInitialResolved || syncPausedForConflict || accountSwitchApproved) return;
+  const data = currentTrackerData();
+  const fingerprint = stableTrackerData(data);
+  if (fingerprint === lastSyncedCloudFingerprint) {
+    setSyncStatus('Synced ✓', 'synced');
+    return;
+  }
+  if (cloudSyncInProgress && fingerprint === cloudWriteFingerprint) return;
+  if (cloudSyncInProgress) {
+    cloudWriteQueued = true;
+    return;
+  }
   if (cloudSyncTimer !== null) window.clearTimeout(cloudSyncTimer);
   setSyncStatus(navigator.onLine ? 'Syncing…' : 'Offline', navigator.onLine ? 'syncing' : 'offline');
   if (!navigator.onLine) {
@@ -362,6 +375,8 @@ function scheduleCloudWrite(delay = 1000) {
 
 async function writeCloudData(data) {
   if (!currentUser || !userDocument || !cloudInitialResolved || syncPausedForConflict || accountSwitchApproved) return false;
+  const fingerprint = stableTrackerData(data);
+  if (fingerprint === lastSyncedCloudFingerprint) return true;
   if (!stateWritable || !dividendsWritable) {
     setSyncStatus('Sync blocked by local storage error', 'error');
     return false;
@@ -378,6 +393,7 @@ async function writeCloudData(data) {
   const generation = cloudListenerGeneration;
   const targetDocument = userDocument;
   cloudSyncInProgress = true;
+  cloudWriteFingerprint = fingerprint;
   cloudWriteQueued = false;
   setSyncStatus('Syncing…', 'syncing');
   try {
@@ -387,6 +403,7 @@ async function writeCloudData(data) {
       updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
     });
     if (generation === cloudListenerGeneration) {
+      lastSyncedCloudFingerprint = fingerprint;
       if (rememberSyncOwner(currentUser.uid)) setSyncStatus('Synced ✓', 'synced');
     }
     return true;
@@ -398,6 +415,7 @@ async function writeCloudData(data) {
   } finally {
     if (generation === cloudListenerGeneration) {
       cloudSyncInProgress = false;
+      cloudWriteFingerprint = null;
       if (cloudWriteQueued && navigator.onLine) scheduleCloudWrite(0);
     }
   }
@@ -422,6 +440,7 @@ async function resolveInitialCloudData(snapshot, generation) {
     exchangeRateUpdatedAt: null,
     updatedAt: 0,
   };
+  lastSyncedCloudFingerprint = stableTrackerData(remote);
   const local = currentTrackerData();
   const localHasRecords = trackerDataHasRecords(local);
   const remoteHasRecords = trackerDataHasRecords(remote);
@@ -455,6 +474,7 @@ async function resolveInitialCloudData(snapshot, generation) {
         exchangeRateUpdatedAt: null,
         updatedAt: 0,
       };
+      lastSyncedCloudFingerprint = stableTrackerData(remote);
     }
     const merged = mergeTrackerData(currentTrackerData(), remote, choice);
     cloudInitialResolved = true;
@@ -518,6 +538,7 @@ function handleCloudSnapshot(snapshot, generation = cloudListenerGeneration) {
   }
   try {
     const remote = normalizeCloudData(snapshot.data());
+    lastSyncedCloudFingerprint = stableTrackerData(remote);
     const local = currentTrackerData();
     const merged = mergeTrackerData(local, remote);
     const localChanged = stableTrackerData(merged) !== stableTrackerData(local);
@@ -559,6 +580,8 @@ function handleAuthStateChange(user) {
   syncPausedForConflict = false;
   cloudWriteQueued = false;
   cloudSyncInProgress = false;
+  cloudWriteFingerprint = null;
+  lastSyncedCloudFingerprint = null;
   pendingCloudSnapshot = null;
   accountSwitchApproved = false;
   elements.signInButton.textContent = user ? 'Sign out' : 'Sign in with Google';
