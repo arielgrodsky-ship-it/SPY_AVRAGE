@@ -61,6 +61,11 @@ function setSyncStatus(message, stateName = 'idle', title = '') {
   elements.syncStatus.textContent = message;
   elements.syncStatus.dataset.state = stateName;
   elements.syncStatus.title = title;
+  const canReopenChoice = stateName === 'choose';
+  elements.syncStatus.tabIndex = canReopenChoice ? 0 : -1;
+  elements.syncStatus.setAttribute('role', canReopenChoice ? 'button' : 'status');
+  if (canReopenChoice) elements.syncStatus.setAttribute('aria-label', 'Choose sync option. Activate to open the first-sync choices.');
+  else elements.syncStatus.removeAttribute('aria-label');
 }
 
 function reportSyncError(context, error, fallbackCode = 'firestore/unknown') {
@@ -337,7 +342,10 @@ function stableTrackerData(data) {
 
 function persistLocalTrackerData(data, options = {}) {
   if (!stateWritable || !dividendsWritable) {
-    setSyncStatus('Sync blocked by local storage error', 'error');
+    const error = new Error('Local tracker storage is not writable.');
+    error.code = 'local/storage-unavailable';
+    if (options.firstSyncChoice) reportSyncError('Apply first-sync choice', error);
+    else setSyncStatus('Sync blocked by local storage error', 'error');
     return false;
   }
   const shouldRender = stableTrackerData(data) !== stableTrackerData(currentTrackerData());
@@ -369,7 +377,8 @@ function persistLocalTrackerData(data, options = {}) {
     stateWritable = false;
     dividendsWritable = false;
     updateSaveStatus();
-    if (options.sync === false) setSyncStatus(`Sync blocked: ${error.message}`, 'error');
+    if (options.firstSyncChoice) reportSyncError('Apply first-sync choice', error, 'local/storage-write-failed');
+    else if (options.sync === false) setSyncStatus(`Sync blocked: ${error.message}`, 'error');
     return false;
   }
 
@@ -423,7 +432,10 @@ function scheduleCloudWrite(delay = 1000) {
 async function writeCloudData(data) {
   if (!currentUser || !userDocument || !cloudInitialResolved || syncPausedForConflict || accountSwitchApproved) return false;
   const fingerprint = stableTrackerData(data);
-  if (fingerprint === lastSyncedCloudFingerprint) return true;
+  if (fingerprint === lastSyncedCloudFingerprint) {
+    setSyncStatus('Synced ✓', 'synced');
+    return true;
+  }
   if (!stateWritable || !dividendsWritable) {
     setSyncStatus('Sync blocked by local storage error', 'error');
     return false;
@@ -475,7 +487,7 @@ async function writeCloudData(data) {
 function requestSyncChoice() {
   return new Promise((resolve) => {
     const dialog = elements.syncConflictDialog;
-    setSyncStatus('Choose sync option', 'idle', 'Choose which tracker data to use for the first sync.');
+    setSyncStatus('Choose sync option', 'choose', 'Choose which tracker data to use for the first sync.');
     const handleClose = () => resolve(dialog.returnValue || 'cancel');
     dialog.addEventListener('close', handleClose, { once: true });
     dialog.showModal();
@@ -511,9 +523,12 @@ async function resolveInitialCloudData(snapshot, generation) {
     if (generation !== cloudListenerGeneration) return;
     if (choice === 'cancel') {
       syncPausedForConflict = true;
-      setSyncStatus('Sync paused', 'error', 'Sign out and back in to choose a sync option.');
+      pendingCloudSnapshot = pendingCloudSnapshot || snapshot;
+      setSyncStatus('Choose sync option', 'choose', 'Click to reopen the first-sync choices.');
       return;
     }
+    syncPausedForConflict = false;
+    setSyncStatus('Syncing…', 'syncing');
     if (pendingCloudSnapshot) {
       const latest = pendingCloudSnapshot;
       pendingCloudSnapshot = null;
@@ -530,8 +545,8 @@ async function resolveInitialCloudData(snapshot, generation) {
     }
     const merged = mergeTrackerData(currentTrackerData(), remote, choice);
     cloudInitialResolved = true;
-    if (persistLocalTrackerData(merged, { sync: false })) {
-      if (choice !== 'cloud' || stableTrackerData(merged) !== stableTrackerData(remote)) {
+    if (persistLocalTrackerData(merged, { sync: false, firstSyncChoice: true })) {
+      if (stableTrackerData(merged) !== stableTrackerData(remote)) {
         await writeCloudData(currentTrackerData());
       } else {
         if (rememberSyncOwner(currentUser.uid)) setSyncStatus('Synced ✓', 'synced');
@@ -559,6 +574,38 @@ async function resolveInitialCloudData(snapshot, generation) {
   }
 }
 
+function startInitialCloudResolution(snapshot, generation) {
+  if (cloudInitialResolution) return;
+  cloudInitialResolution = resolveInitialCloudData(snapshot, generation)
+    .catch((error) => {
+      if (generation === cloudListenerGeneration) reportSyncError('Initial Firestore read', error, 'firestore/initial-read-failed');
+    })
+    .finally(() => {
+      if (generation !== cloudListenerGeneration) return;
+      cloudInitialResolution = null;
+      if (pendingCloudSnapshot && cloudInitialResolved) {
+        const pending = pendingCloudSnapshot;
+        pendingCloudSnapshot = null;
+        handleCloudSnapshot(pending, generation);
+      } else if (!syncPausedForConflict) {
+        pendingCloudSnapshot = null;
+      }
+    });
+}
+
+function resumePendingSyncChoice() {
+  if (elements.syncStatus.dataset.state !== 'choose'
+    || !syncPausedForConflict
+    || cloudInitialResolved
+    || cloudInitialResolution
+    || !pendingCloudSnapshot
+    || !currentUser) return;
+  const snapshot = pendingCloudSnapshot;
+  pendingCloudSnapshot = null;
+  syncPausedForConflict = false;
+  startInitialCloudResolution(snapshot, cloudListenerGeneration);
+}
+
 function handleCloudSnapshot(snapshot, generation = cloudListenerGeneration) {
   if (generation !== cloudListenerGeneration || !currentUser || syncPausedForConflict) return;
   if (!cloudInitialResolved) {
@@ -572,17 +619,7 @@ function handleCloudSnapshot(snapshot, generation = cloudListenerGeneration) {
       pendingCloudSnapshot = snapshot;
       return;
     }
-    cloudInitialResolution = resolveInitialCloudData(snapshot, generation)
-      .catch((error) => {
-        if (generation === cloudListenerGeneration) reportSyncError('Initial Firestore read', error, 'firestore/initial-read-failed');
-      })
-      .finally(() => {
-        if (generation !== cloudListenerGeneration) return;
-        cloudInitialResolution = null;
-        const pending = pendingCloudSnapshot;
-        pendingCloudSnapshot = null;
-        if (pending && cloudInitialResolved) handleCloudSnapshot(pending, generation);
-      });
+    startInitialCloudResolution(snapshot, generation);
     return;
   }
   if (snapshot.metadata?.hasPendingWrites) return;
@@ -1405,6 +1442,12 @@ elements.importBackup.addEventListener('click', () => elements.backupFile.click(
 elements.backupFile.addEventListener('change', () => {
   const [file] = elements.backupFile.files;
   if (file) importBackup(file);
+});
+elements.syncStatus.addEventListener('click', resumePendingSyncChoice);
+elements.syncStatus.addEventListener('keydown', (event) => {
+  if (elements.syncStatus.dataset.state !== 'choose' || (event.key !== 'Enter' && event.key !== ' ')) return;
+  event.preventDefault();
+  resumePendingSyncChoice();
 });
 elements.signInButton.addEventListener('click', toggleGoogleSignIn);
 
