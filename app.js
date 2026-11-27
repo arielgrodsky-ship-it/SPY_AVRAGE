@@ -35,6 +35,7 @@ const elements = {
   returnDirection: document.querySelector('#return-direction'),
   toastRegion: document.querySelector('#toast-region'),
   signInButton: document.querySelector('#sign-in-button'),
+  signInMessage: document.querySelector('#sign-in-message'),
   syncStatus: document.querySelector('#sync-status'),
   syncConflictDialog: document.querySelector('#sync-conflict-dialog'),
 };
@@ -73,6 +74,27 @@ function reportSyncError(context, error, fallbackCode = 'firestore/unknown') {
   const message = error?.message || String(error);
   console.error(`[Fieldnotes sync] ${context}`, { code, message });
   setSyncStatus('Sync error', 'error', `${code}: ${message}`);
+}
+
+function setSignInMessage(message = '', stateName = 'info') {
+  elements.signInMessage.textContent = message;
+  elements.signInMessage.dataset.state = stateName;
+  elements.signInMessage.hidden = !message;
+}
+
+function isInAppBrowser() {
+  return /FBAN|FBAV|Instagram|\bLine\b|Telegram|WhatsApp|\bwv\b/i.test(navigator.userAgent);
+}
+
+function showGoogleSignInError(error) {
+  const code = error?.code || 'auth/sign-in-failed';
+  const explanations = {
+    'auth/popup-blocked': 'Your browser blocked the Google sign-in window. Allow pop-ups and try again.',
+    'auth/popup-closed-by-user': 'The Google sign-in window was closed before sign-in finished. Try again.',
+  };
+  const explanation = explanations[code] || 'Google sign-in could not be completed. Please try again.';
+  reportSyncError('Google sign-in', error, 'firebase/sign-in-failed');
+  setSignInMessage(`${code}: ${explanation}`, 'error');
 }
 
 function firebaseConfigError() {
@@ -694,6 +716,9 @@ function handleAuthStateChange(user) {
   pendingCloudSnapshot = null;
   accountSwitchApproved = false;
   elements.signInButton.textContent = user ? 'Sign out' : 'Sign in with Google';
+  setSignInMessage(user || !isInAppBrowser()
+    ? ''
+    : 'Open this page in Chrome or Safari to sign in with Google.');
   if (!user) {
     setSyncStatus(firebaseConfigIsReady() ? 'Not signed in' : 'Sync setup needed', 'idle');
     return;
@@ -725,6 +750,9 @@ function handleAuthStateChange(user) {
 }
 
 function initializeCloudSync() {
+  if (isInAppBrowser()) {
+    setSignInMessage('Open this page in Chrome or Safari to sign in with Google.');
+  }
   if (!firebaseConfigIsReady()) {
     reportSyncError('Firebase setup', firebaseConfigError());
     return;
@@ -742,15 +770,13 @@ function initializeCloudSync() {
     firebaseAuth.onAuthStateChanged(handleAuthStateChange, (error) => {
       reportSyncError('Firebase authentication setup', error, 'firebase/auth-state-failed');
     });
-    firebaseAuth.getRedirectResult().catch((error) => {
-      reportSyncError('Google sign-in redirect', error, 'firebase/redirect-result-failed');
-    });
   } catch (error) {
     reportSyncError('Firebase setup', error, 'firebase/initialization-failed');
   }
 }
 
-async function toggleGoogleSignIn() {
+function toggleGoogleSignIn() {
+  setSignInMessage('');
   if (!firebaseConfigIsReady()) {
     reportSyncError('Firebase setup', firebaseConfigError());
     window.alert('Add your Firebase web app config to firebase-config.js before signing in.');
@@ -763,21 +789,35 @@ async function toggleGoogleSignIn() {
     window.alert('Firebase could not initialize. Check your Firebase config and network connection.');
     return;
   }
+  if (firebaseAuth.currentUser) {
+    elements.signInButton.disabled = true;
+    firebaseAuth.signOut()
+      .catch((error) => {
+        reportSyncError('Google sign-out', error, 'firebase/sign-out-failed');
+      })
+      .finally(() => {
+        elements.signInButton.disabled = false;
+      });
+    return;
+  }
+
+  if (isInAppBrowser()) {
+    setSignInMessage('Open this page in Chrome or Safari to sign in with Google.');
+    return;
+  }
+
   elements.signInButton.disabled = true;
   try {
-    if (firebaseAuth.currentUser) {
-      await firebaseAuth.signOut();
-    } else {
-      const provider = new firebase.auth.GoogleAuthProvider();
-      if (window.matchMedia('(max-width: 760px)').matches) {
-        await firebaseAuth.signInWithRedirect(provider);
-      } else {
-        await firebaseAuth.signInWithPopup(provider);
-      }
-    }
+    const provider = new firebase.auth.GoogleAuthProvider();
+    const signInAttempt = firebaseAuth.signInWithPopup(provider);
+    signInAttempt
+      .then(() => setSignInMessage(''))
+      .catch(showGoogleSignInError)
+      .finally(() => {
+        elements.signInButton.disabled = false;
+      });
   } catch (error) {
-    reportSyncError('Google sign-in', error, 'firebase/sign-in-failed');
-  } finally {
+    showGoogleSignInError(error);
     elements.signInButton.disabled = false;
   }
 }

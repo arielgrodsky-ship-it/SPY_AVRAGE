@@ -20,7 +20,10 @@
         <span>Fieldnotes <span class="brand-divider">/</span> SPY</span>
       </a>
       <div class="topbar-actions">
-        <button class="sync-button" id="sign-in-button" type="button">Sign in with Google</button>
+        <div class="sign-in-control">
+          <button class="sync-button" id="sign-in-button" type="button">Sign in with Google</button>
+          <span class="sign-in-message" id="sign-in-message" role="status" aria-live="polite" hidden></span>
+        </div>
         <span class="sync-status" id="sync-status" role="status" aria-live="polite" title="Configure Firebase to enable sync">Sync setup needed</span>
         <span class="save-status" id="save-status"><span class="status-dot"></span> Saved on this device</span>
       </div>

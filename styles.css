@@ -106,6 +106,10 @@ button { color: inherit; }
 .sync-button { padding: 8px 13px; color: var(--text); cursor: pointer; font-size: 12px; font-weight: 700; white-space: nowrap; }
 .sync-button:hover { border-color: var(--accent); color: var(--accent); }
 .sync-button:disabled { cursor: wait; opacity: .6; }
+.sign-in-control { position: relative; flex: 0 0 auto; }
+.sign-in-message { position: absolute; z-index: 3; top: calc(100% + 6px); left: 0; width: min(280px, calc(100vw - 32px)); color: var(--text-2); font-size: 11px; line-height: 1.4; }
+.sign-in-message[hidden] { display: none; }
+.sign-in-message[data-state="error"] { color: var(--neg); }
 .sync-status { display: inline-flex; min-height: 34px; align-items: center; gap: 7px; padding: 6px 11px; color: var(--text-2); font: 11px var(--font); white-space: nowrap; }
 .sync-status[data-state="choose"] { cursor: pointer; }
 .sync-status::before { width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; background: var(--text-2); content: ""; }
