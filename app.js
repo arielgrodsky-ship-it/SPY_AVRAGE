@@ -284,14 +284,21 @@ function mergeTrackerData(local, remote, preference = 'newest') {
 }
 
 function stableTrackerData(data) {
-  return JSON.stringify({
+  const sortObjectKeys = (value) => {
+    if (Array.isArray(value)) return value.map(sortObjectKeys);
+    if (value && typeof value === 'object') {
+      return Object.fromEntries(Object.keys(value).sort().map((key) => [key, sortObjectKeys(value[key])]));
+    }
+    return value;
+  };
+  return JSON.stringify(sortObjectKeys({
     currentPrice: data.currentPrice,
     exchangeRate: data.exchangeRate,
     quoteUpdatedAt: data.quoteUpdatedAt,
     exchangeRateUpdatedAt: data.exchangeRateUpdatedAt,
     buys: [...data.buys].sort((first, second) => first.id.localeCompare(second.id)),
     dividends: [...data.dividends].sort((first, second) => first.id.localeCompare(second.id)),
-  });
+  }));
 }
 
 function persistLocalTrackerData(data, options = {}) {
