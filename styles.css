@@ -190,7 +190,7 @@ h1 { margin-bottom: 9px; font: 700 34px/1.15 var(--font); letter-spacing: -.5px;
   grid-template-columns: minmax(0, 1.7fr) repeat(3, minmax(0, 1fr));
   gap: 18px;
   align-items: stretch;
-  padding: 8px 0;
+  padding: 8px 16px 8px 0;
   perspective: 1000px;
 }
 
@@ -198,7 +198,7 @@ h1 { margin-bottom: 9px; font: 700 34px/1.15 var(--font); letter-spacing: -.5px;
   min-width: 0;
   min-height: 150px;
   padding: 20px 19px 17px;
-  transform: rotateX(14deg) rotateY(-20deg) rotateZ(2deg);
+  transform: rotateX(10deg) rotateY(-8deg) rotateZ(1deg);
   transform-origin: center;
   transition: transform .3s ease, border-color .3s ease;
 }
@@ -213,7 +213,7 @@ h1 { margin-bottom: 9px; font: 700 34px/1.15 var(--font); letter-spacing: -.5px;
 .metric-primary .metric-value { color: var(--accent); font-size: 72px; line-height: .98; text-shadow: 0 0 40px rgba(182,255,59,.55); }
 .metric-value.negative { color: var(--neg); }
 .metric-primary .metric-value.negative { color: var(--neg); text-shadow: 0 0 32px rgba(255,107,107,.4); }
-.metric-foot { overflow: hidden; margin: 10px 0 0; color: var(--text-2); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.metric-foot { margin: 10px 0 0; color: var(--text-2); font-size: 12px; white-space: normal; overflow-wrap: anywhere; }
 .metric-tax { display: flex; justify-content: space-between; gap: 8px; margin: 6px 0 0; color: var(--text-2); font-size: 12px; white-space: nowrap; }
 .metric-tax strong { color: var(--accent); font: 700 12px var(--font); }
 .metric-tax strong.negative { color: var(--neg); }
@@ -301,7 +301,7 @@ td.numeric { font-size: 12px; }
 .empty-state p { margin: 0 0 5px; color: var(--text); font: 700 13px var(--font); }
 .empty-state > span:last-child { color: var(--text-2); font-size: 12px; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
-.holdings-section .table-wrap { width: min(100%, 980px); }
+.holdings-section .table-wrap { width: 100%; }
 .buy-table { min-width: 860px; table-layout: fixed; }
 .buy-table th:nth-child(1), .buy-table td:nth-child(1) { width: 16%; }
 .buy-table th:nth-child(2), .buy-table td:nth-child(2) { width: 12%; }
@@ -310,9 +310,9 @@ td.numeric { font-size: 12px; }
 .buy-table th:nth-child(5), .buy-table td:nth-child(5) { width: 17%; }
 .buy-table th:nth-child(6), .buy-table td:nth-child(6) { width: 13%; }
 .buy-table th:nth-child(7), .buy-table td:nth-child(7) { width: 60px; }
-.table-controls { width: min(100%, 980px); padding-top: 8px; text-align: center; }
+.table-controls { width: 100%; padding-top: 8px; text-align: center; }
 .table-controls[hidden], .table-controls button[hidden] { display: none; }
-.dividends-section .table-wrap { width: min(100%, 760px); }
+.dividends-section .table-wrap { width: 100%; }
 .dividend-table { min-width: 520px; table-layout: fixed; }
 .dividend-table th:nth-child(1), .dividend-table td:nth-child(1) { width: 28%; }
 .dividend-table th:nth-child(2), .dividend-table td:nth-child(2) { width: 27%; }
@@ -381,7 +381,7 @@ td.numeric { font-size: 12px; }
   .app-shell { width: calc(100% - 28px); }
   .topbar { gap: 8px; }
   .topbar-actions { gap: 6px; }
-  .sync-status { gap: 5px; padding: 6px 8px; font-size: 10px; }
+  .sync-status { gap: 5px; padding: 6px 8px; font-size: 11px; }
   .sync-button { padding: 7px 8px; font-size: 11px; }
   .brand { gap: 7px; font-size: 12px; }
   h1 { font-size: 29px; }
