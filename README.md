@@ -2,6 +2,16 @@
 
 A browser-based tracker for SPY buy lots, portfolio value, and estimated returns in USD and ILS. Buy data is saved in the current browser and is not synced between devices.
 
+## Portfolio features and backups
+
+- Export or import a timestamped JSON backup of buy lots, market values, and logged dividends. Imports are validated and can replace or merge with current entries.
+- An optional USD / ILS rate is saved with each new buy. Older lots without a purchase rate use the current rate for ILS calculations.
+- The estimated Israeli capital-gains tax applies 25% to gains remaining after the purchase-to-current USD / ILS adjustment. This is only an estimate: it does not fetch CPI data, account for fees or other tax rules, or replace professional tax advice.
+- Log dividend amounts as received to include them in total returns. Reinvested is recorded for reference and does not change share counts; add a buy lot separately when shares are purchased.
+- A chart shows cumulative average cost, individual purchase prices, and the current SPY price.
+
+The original `fieldnotes.spy-tracker.v1` browser-storage key remains in use for buys and market settings. Dividends are stored separately under `fieldnotes.spy-tracker.dividends.v1`.
+
 ## Run locally
 
 Requires Python 3. From this folder, run:

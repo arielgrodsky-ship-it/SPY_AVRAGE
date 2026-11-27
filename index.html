@@ -55,12 +55,13 @@
         <article class="metric-card">
           <div class="metric-label">TOTAL MADE <span class="metric-currency">USD</span></div>
           <div class="metric-value" id="profit-usd">$0.00</div>
-          <p class="metric-foot">Unrealized profit / loss</p>
+          <p class="metric-foot">Share gain / loss + logged dividends</p>
         </article>
         <article class="metric-card">
           <div class="metric-label">TOTAL MADE <span class="metric-currency">ILS</span></div>
           <div class="metric-value" id="profit-ils">₪0.00</div>
-          <p class="metric-foot">Converted at your USD / ILS rate</p>
+          <p class="metric-foot">Share gain at buy FX + logged dividends</p>
+          <p class="metric-tax">Est. net after 25% tax <strong id="net-profit-ils">₪0.00</strong></p>
         </article>
         <article class="metric-card">
           <div class="metric-label">AVERAGE BUY <span class="metric-currency">PER SHARE</span></div>
@@ -75,7 +76,28 @@
         <div class="portfolio-item"><span class="strip-label">CURRENT VALUE</span><strong id="current-value">$0.00</strong></div>
         <span class="strip-divider" aria-hidden="true"></span>
         <div class="portfolio-item"><span class="strip-label">BUY LOTS</span><strong id="lot-count">0</strong></div>
-        <p class="portfolio-note">Estimates only. Fees, taxes, and dividends are not included.</p>
+        <div class="portfolio-item"><span class="strip-label">NET DIVIDENDS</span><strong id="dividend-total">$0.00</strong></div>
+        <p class="portfolio-note">FX-based tax estimate only; excludes CPI, fees, and personal tax advice.</p>
+      </section>
+
+      <section class="chart-section" aria-labelledby="chart-title">
+        <div class="section-heading chart-heading">
+          <div>
+            <p class="eyebrow">YOUR COST BASIS</p>
+            <h2 id="chart-title">Average buy vs. market</h2>
+          </div>
+          <div class="chart-legend" aria-label="Chart legend">
+            <span><i class="legend-average"></i>Average buy</span>
+            <span><i class="legend-purchase"></i>Purchase price</span>
+            <span><i class="legend-market"></i>Current SPY</span>
+          </div>
+        </div>
+        <div class="chart-card">
+          <svg id="price-chart" viewBox="0 0 800 300" role="img" aria-labelledby="chart-title chart-description" preserveAspectRatio="xMidYMid meet">
+            <desc id="chart-description">Cumulative average purchase price, individual buy prices, and current SPY price over time.</desc>
+          </svg>
+          <p class="chart-empty" id="chart-empty" hidden>Add a buy lot to see your cost basis over time.</p>
+        </div>
       </section>
 
       <section class="holdings-section" aria-labelledby="holdings-title">
@@ -84,7 +106,12 @@
             <p class="eyebrow">YOUR PURCHASES</p>
             <h2 id="holdings-title">Buy lots <span id="heading-count">(0)</span></h2>
           </div>
-          <button class="text-button" id="clear-all" type="button" hidden>Clear all</button>
+          <div class="heading-actions">
+            <button class="text-button" id="export-backup" type="button">Export JSON</button>
+            <button class="text-button" id="import-backup" type="button">Import JSON</button>
+            <input id="backup-file" type="file" accept=".json,application/json" hidden>
+            <button class="text-button" id="clear-all" type="button" hidden>Clear all</button>
+          </div>
         </div>
 
         <form class="buy-form" id="buy-form">
@@ -99,6 +126,10 @@
           <label class="buy-field date-field">
             <span>Buy date</span>
             <input id="buy-date" name="date" type="date">
+          </label>
+          <label class="buy-field rate-field">
+            <span>USD / ILS at buy <span class="field-unit">OPTIONAL</span></span>
+            <input id="buy-exchange-rate" name="purchaseExchangeRate" type="number" min="0" step="0.0001" inputmode="decimal" placeholder="Uses current rate">
           </label>
           <button class="add-button" type="submit"><span aria-hidden="true">+</span> Add buy</button>
         </form>
@@ -122,6 +153,40 @@
             <span class="empty-mark" aria-hidden="true">+</span>
             <p>No buys yet</p>
             <span>Add your first SPY buy above to start tracking.</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="dividends-section" aria-labelledby="dividends-title">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">CASH INCOME</p>
+            <h2 id="dividends-title">Dividends <span id="dividend-count">(0)</span></h2>
+          </div>
+        </div>
+        <form class="buy-form dividend-form" id="dividend-form">
+          <label class="buy-field date-field">
+            <span>Payment date</span>
+            <input id="dividend-date" name="date" type="date" required>
+          </label>
+          <label class="buy-field">
+            <span>Net amount <span class="field-unit">USD</span></span>
+            <span class="input-wrap"><span>$</span><input id="dividend-amount" name="amount" type="number" min="0.01" step="0.01" inputmode="decimal" placeholder="e.g. 1.25" required></span>
+          </label>
+          <label class="reinvest-field"><input id="dividend-reinvested" type="checkbox"> Reinvested</label>
+          <button class="add-button" type="submit"><span aria-hidden="true">+</span> Add dividend</button>
+        </form>
+        <p class="dividend-note">Log the net payout received. Reinvested is recorded for reference; add a buy lot separately to update your shares.</p>
+        <div class="table-wrap">
+          <table class="dividend-table">
+            <thead>
+              <tr><th scope="col">DATE</th><th scope="col" class="numeric">AMOUNT</th><th scope="col">REINVESTED</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr>
+            </thead>
+            <tbody id="dividend-list"></tbody>
+          </table>
+          <div class="empty-state visible" id="dividend-empty">
+            <p>No dividends logged</p>
+            <span>Add quarterly SPY payouts to include them in your return.</span>
           </div>
         </div>
       </section>
