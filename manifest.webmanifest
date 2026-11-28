@@ -1,0 +1,16 @@
+{
+  "name": "SPY Buy Tracker",
+  "short_name": "SPY",
+  "display": "standalone",
+  "background_color": "#0A0A18",
+  "theme_color": "#2563EB",
+  "start_url": "./",
+  "scope": "./",
+  "icons": [
+    {
+      "src": "img/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
